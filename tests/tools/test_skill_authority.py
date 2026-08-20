@@ -2,10 +2,64 @@ import json
 
 from tools.skill_authority import (
     build_manifest,
+    canonical_deployment_authority,
+    check_managed_runtime_mutation,
     classify_skill_identifier,
     deploy_runtime_authority,
     validate_runtime_authority,
 )
+
+
+def test_managed_decision_is_caller_independent(tmp_path):
+    source = _skill(tmp_path / "source", "software-development", "managed-skill")
+    runtime = _skill(tmp_path / "runtime", "software-development", "managed-skill")
+    manifest = build_manifest(
+        tmp_path / "runtime",
+        {"managed-skill": {"source_path": str(source), "source_repo": "test"}},
+    )
+    (tmp_path / "runtime" / ".governance_manifest.json").write_text(json.dumps(manifest))
+
+    foreground = check_managed_runtime_mutation(
+        runtime, "patch", mutation_authority="foreground", runtime_root=tmp_path / "runtime"
+    )
+    background = check_managed_runtime_mutation(
+        runtime, "patch", mutation_authority="background_review", runtime_root=tmp_path / "runtime"
+    )
+    assert foreground == background
+    assert foreground.allowed is False
+    assert foreground.managed is True
+
+
+def test_only_canonical_deployment_authority_can_allow_managed_mutation(tmp_path):
+    source = _skill(tmp_path / "source", "software-development", "managed-skill")
+    runtime = _skill(tmp_path / "runtime", "software-development", "managed-skill")
+    manifest = build_manifest(
+        tmp_path / "runtime",
+        {"managed-skill": {"source_path": str(source), "source_repo": "test"}},
+    )
+    (tmp_path / "runtime" / ".governance_manifest.json").write_text(json.dumps(manifest))
+
+    denied = check_managed_runtime_mutation(runtime, "patch", runtime_root=tmp_path / "runtime")
+    assert denied.allowed is False
+    with canonical_deployment_authority():
+        allowed = check_managed_runtime_mutation(runtime, "patch", runtime_root=tmp_path / "runtime")
+    assert allowed.allowed is True
+    assert allowed.managed is True
+
+
+def test_invalid_manifest_fails_closed_for_critical_path_but_not_unmanaged(tmp_path):
+    runtime = tmp_path / "runtime"
+    critical = runtime / "lah-stack" / "lah-workflow-small-model"
+    critical.mkdir(parents=True)
+    (critical / "SKILL.md").write_text("managed", encoding="utf-8")
+    (runtime / ".governance_manifest.json").write_text("{invalid", encoding="utf-8")
+
+    critical_decision = check_managed_runtime_mutation(critical, "patch", runtime_root=runtime)
+    user_decision = check_managed_runtime_mutation(runtime / "user-skill", "patch", runtime_root=runtime)
+    assert critical_decision.managed is True
+    assert critical_decision.allowed is False
+    assert user_decision.managed is False
+    assert user_decision.allowed is True
 
 
 def _skill(root, category, name, body="body"):

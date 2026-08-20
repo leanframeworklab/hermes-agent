@@ -524,6 +524,39 @@ class TestRemoveFile:
 
 
 class TestSkillManageDispatcher:
+    def test_create_cannot_claim_declared_managed_runtime_path(self, tmp_path):
+        """A declared managed name stays protected even when runtime is absent."""
+        from tools.skill_authority import _skill_fingerprint
+
+        source_dir = tmp_path / "source" / "lah-stack" / "managed-skill"
+        source_dir.mkdir(parents=True)
+        source_content = VALID_SKILL_CONTENT.replace("test-skill", "managed-skill")
+        (source_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        runtime_root = tmp_path / "runtime"
+        runtime_root.mkdir()
+        (runtime_root / ".governance_manifest.json").write_text(json.dumps({
+            "schema_version": 1,
+            "skills": {
+                "managed-skill": {
+                    "invocation_name": "managed-skill",
+                    "source_path": str(source_dir),
+                    "source_repo": "fixture",
+                    "runtime_path": "lah-stack/managed-skill",
+                    "source_content_sha256": _skill_fingerprint(source_dir),
+                    "runtime_content_sha256": "missing",
+                }
+            },
+        }), encoding="utf-8")
+
+        with _skill_dir(runtime_root):
+            result = json.loads(skill_manage(
+                action="create", name="managed-skill", content=source_content, category="lah-stack"
+            ))
+
+        assert result["success"] is False
+        assert result["error"] == "managed_skill_runtime_immutable"
+        assert not (runtime_root / "lah-stack" / "managed-skill" / "SKILL.md").exists()
+
     def test_background_review_reproduces_managed_runtime_drift_before_repair(self, tmp_path):
         """Forensic fixture: legacy review writes runtime and invalidates authority."""
         from tools.skill_authority import build_manifest, validate_runtime_authority
