@@ -55,3 +55,13 @@ def test_invalid_critical_authority_blocks_governed_turn():
     )
     assert state.downstream_allowed is False
     assert state.before_tool("terminal", {}).allowed is False
+    assert state.is_terminal_failure is True
+    assert json.loads(state.before_tool("terminal", {}).result)["governance"]["turn_halted"] is True
+
+
+def test_router_required_is_not_terminal_and_can_recover():
+    state = GovernedSkillState(governed=True)
+    assert state.is_terminal_failure is False
+    state.observe_skill_result("lah-repo-router", {"success": True, "skill_name": "lah-repo-router"})
+    assert state.phase is GovernancePhase.DECOMPOSER_REQUIRED
+    assert state.is_terminal_failure is False

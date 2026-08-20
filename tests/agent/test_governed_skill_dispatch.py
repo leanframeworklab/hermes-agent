@@ -37,3 +37,16 @@ def test_dispatch_boundary_denies_terminal_until_both_gates_pass():
         json.dumps({"success": True, "skill_name": "mission-decomposer"}),
     )
     assert _governance_preflight(agent, "terminal", {"command": "true"}) is None
+
+
+def test_terminal_authority_failure_sets_turn_halt_once():
+    agent = _Agent()
+    agent._governed_skill_state = GovernedSkillState(
+        governed=True, authority_valid=False, authority_errors=("drift",)
+    )
+    blocked = _governance_preflight(agent, "terminal", {})
+    receipt = json.loads(blocked)
+    assert receipt["governance"]["phase"] == "MANDATORY_SKILL_RESOLUTION_FAILED"
+    assert receipt["governance"]["turn_halted"] is True
+    assert agent._governance_turn_halted is True
+    assert _governance_preflight(agent, "read_file", {}) == blocked

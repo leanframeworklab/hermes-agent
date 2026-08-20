@@ -524,6 +524,120 @@ class TestRemoveFile:
 
 
 class TestSkillManageDispatcher:
+    def test_background_review_reproduces_managed_runtime_drift_before_repair(self, tmp_path):
+        """Forensic fixture: legacy review writes runtime and invalidates authority."""
+        from tools.skill_authority import build_manifest, validate_runtime_authority
+        from tools.skill_provenance import BACKGROUND_REVIEW, reset_current_write_origin, set_current_write_origin
+
+        source_root = tmp_path / "source"
+        source_dir = source_root / "lah-stack" / "managed-skill"
+        source_dir.mkdir(parents=True)
+        source_content = VALID_SKILL_CONTENT.replace("test-skill", "managed-skill")
+        (source_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        runtime_root = tmp_path / "runtime"
+        runtime_dir = runtime_root / "lah-stack" / "managed-skill"
+        runtime_dir.mkdir(parents=True)
+        (runtime_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        manifest = build_manifest(
+            runtime_root,
+            {"managed-skill": {"source_path": str(source_dir), "source_repo": "fixture"}},
+        )
+        (runtime_root / ".governance_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+
+        token = set_current_write_origin(BACKGROUND_REVIEW)
+        try:
+            with _skill_dir(runtime_root):
+                raw = skill_manage(
+                    action="patch",
+                    name="managed-skill",
+                    old_string="Step 1: Do the thing.",
+                    new_string="Step 1: Drift the deployed artifact.",
+                )
+        finally:
+            reset_current_write_origin(token)
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["action"] == "STAGED"
+        unchanged_manifest = json.loads((runtime_root / ".governance_manifest.json").read_text())
+        assert validate_runtime_authority(runtime_root, unchanged_manifest, critical=("managed-skill",))["valid"] is True
+        assert (runtime_dir / "SKILL.md").read_text(encoding="utf-8") == source_content
+        proposal = json.loads(Path(result["proposal_path"]).read_text(encoding="utf-8"))
+        assert proposal["skill"] == "managed-skill"
+        assert proposal["payload"]["proposed_content"].endswith("Step 1: Drift the deployed artifact.\n")
+
+    def test_managed_runtime_patch_is_denied_after_repair(self, tmp_path):
+        """Managed runtime must reject ordinary mutation before writing."""
+        from tools.skill_authority import build_manifest
+
+        source_root = tmp_path / "source"
+        source_dir = source_root / "lah-stack" / "managed-skill"
+        source_dir.mkdir(parents=True)
+        source_content = VALID_SKILL_CONTENT.replace("test-skill", "managed-skill")
+        (source_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        runtime_root = tmp_path / "runtime"
+        runtime_dir = runtime_root / "lah-stack" / "managed-skill"
+        runtime_dir.mkdir(parents=True)
+        (runtime_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        manifest = build_manifest(
+            runtime_root,
+            {"managed-skill": {"source_path": str(source_dir), "source_repo": "fixture"}},
+        )
+        (runtime_root / ".governance_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with _skill_dir(runtime_root):
+            raw = skill_manage(
+                action="patch",
+                name="managed-skill",
+                old_string="Step 1: Do the thing.",
+                new_string="Step 1: Must be denied.",
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["error"] == "managed_skill_runtime_immutable"
+        assert (runtime_dir / "SKILL.md").read_text(encoding="utf-8") == source_content
+
+    @pytest.mark.parametrize(
+        "action,kwargs",
+        [
+            ("edit", {"content": VALID_SKILL_CONTENT_2}),
+            ("write_file", {"file_path": "references/new.md", "file_content": "new"}),
+            ("delete", {}),
+            ("remove_file", {"file_path": "references/existing.md"}),
+        ],
+    )
+    def test_all_managed_runtime_mutations_are_denied_or_staged(self, tmp_path, action, kwargs):
+        from tools.skill_authority import build_manifest
+        from tools.skill_provenance import BACKGROUND_REVIEW, reset_current_write_origin, set_current_write_origin
+
+        source_dir = tmp_path / "source" / "lah-stack" / "managed-skill"
+        source_dir.mkdir(parents=True)
+        source_content = VALID_SKILL_CONTENT.replace("test-skill", "managed-skill")
+        (source_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        runtime_root = tmp_path / "runtime"
+        runtime_dir = runtime_root / "lah-stack" / "managed-skill"
+        runtime_dir.mkdir(parents=True)
+        (runtime_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
+        if action == "remove_file":
+            (runtime_dir / "references").mkdir()
+            (runtime_dir / "references" / "existing.md").write_text("existing", encoding="utf-8")
+        manifest = build_manifest(runtime_root, {"managed-skill": {"source_path": str(source_dir), "source_repo": "fixture"}})
+        (runtime_root / ".governance_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        token = set_current_write_origin(BACKGROUND_REVIEW)
+        try:
+            with _skill_dir(runtime_root):
+                result = json.loads(skill_manage(action=action, name="managed-skill", **kwargs))
+        finally:
+            reset_current_write_origin(token)
+        assert result["success"] is False
+        assert result["error"] == "managed_skill_runtime_immutable"
+        assert result["action"] == "STAGED"
+        assert (runtime_dir / "SKILL.md").read_text(encoding="utf-8") == source_content
+
     def test_unknown_action(self, tmp_path):
         with _skill_dir(tmp_path):
             raw = skill_manage(action="explode", name="test")
