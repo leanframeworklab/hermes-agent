@@ -3218,6 +3218,13 @@ def install_from_quarantine(
     # path can never refer to a redirected target.
     install_dir = _resolve_lock_install_path(install_rel_path, safe_skill_name)
 
+    from tools.skill_authority import is_governance_managed_skill
+    if is_governance_managed_skill(install_dir, SKILLS_DIR):
+        raise PermissionError(
+            f"managed_skill_runtime_immutable: {safe_skill_name}; "
+            "canonical deployment authority required"
+        )
+
     if install_dir.exists():
         shutil.rmtree(install_dir)
 
@@ -3298,6 +3305,10 @@ def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
         )
     except ValueError as exc:
         return False, f"Refusing to uninstall '{skill_name}': {exc}"
+
+    from tools.skill_authority import is_governance_managed_skill
+    if is_governance_managed_skill(install_path, SKILLS_DIR):
+        return False, "managed_skill_runtime_immutable: canonical deployment authority required"
 
     if install_path.exists():
         shutil.rmtree(install_path)

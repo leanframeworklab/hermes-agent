@@ -557,6 +557,17 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
 
     skills = _skills_dir()
     skills.mkdir(parents=True, exist_ok=True)
+    try:
+        from tools.skill_authority import load_runtime_authority_status
+        authority = load_runtime_authority_status(skills)
+        if authority.get("valid") and authority.get("skills"):
+            return (
+                False,
+                "managed_skill_runtime_immutable: curator restore requires canonical deployment authority",
+                None,
+            )
+    except Exception:
+        logger.debug("Could not inspect skill authority before curator rollback", exc_info=True)
     backups = _backups_dir()
     backups.mkdir(parents=True, exist_ok=True)
 

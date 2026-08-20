@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import contextlib
+import contextvars
 import os
 import shutil
 import subprocess
 import tempfile
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from hermes_constants import get_hermes_home
+
+logger = logging.getLogger(__name__)
 
 
 CRITICAL_SKILLS = (
@@ -22,6 +27,120 @@ CRITICAL_SKILLS = (
     "mission-decomposer",
 )
 MANIFEST_FILENAME = ".governance_manifest.json"
+
+_canonical_deployment = contextvars.ContextVar("canonical_skill_deployment", default=False)
+
+
+@contextlib.contextmanager
+def canonical_deployment_authority():
+    """Authorize the one path allowed to replace managed runtime artifacts."""
+    token = _canonical_deployment.set(True)
+    try:
+        yield
+    finally:
+        _canonical_deployment.reset(token)
+
+
+def _manifest_entry_for_path(path: Path, runtime_root: Path) -> tuple[str, Mapping[str, Any]] | None:
+    try:
+        relative = path.resolve().relative_to(runtime_root.resolve())
+    except (OSError, ValueError):
+        return None
+    try:
+        manifest = json.loads(manifest_path(runtime_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entries = manifest.get("skills", {})
+    if not isinstance(entries, Mapping):
+        return None
+    for name, entry in entries.items():
+        if not isinstance(entry, Mapping):
+            continue
+        declared = Path(str(entry.get("runtime_path", "")))
+        if relative == declared or declared in relative.parents:
+            return str(name), entry
+    return None
+
+
+def is_governance_managed_skill(path_or_name: str | Path, runtime_root: Path | None = None) -> bool:
+    """Return true when name/path is declared as a managed runtime artifact."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    if isinstance(path_or_name, Path) or os.sep in str(path_or_name):
+        return _manifest_entry_for_path(Path(path_or_name), root) is not None
+    try:
+        manifest = json.loads(manifest_path(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    entries = manifest.get("skills", {})
+    return isinstance(entries, Mapping) and isinstance(entries.get(str(path_or_name)), Mapping)
+
+
+def _proposal_root(source_path: Path) -> Path:
+    for parent in source_path.parents:
+        if parent.name == "skills":
+            return parent.parent / ".proposals"
+    return source_path.parent / ".proposals"
+
+
+def stage_self_improvement_proposal(
+    *,
+    skill: str,
+    runtime_path: Path,
+    operation: str,
+    payload: Mapping[str, Any],
+    origin: str,
+    session_id: str = "",
+    runtime_root: Path | None = None,
+) -> Path:
+    """Persist reviewable managed-skill improvement without touching runtime."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    manifest = json.loads(manifest_path(root).read_text(encoding="utf-8"))
+    entry = manifest["skills"][skill]
+    source_path = Path(str(entry["source_path"])).resolve()
+    proposal_dir = _proposal_root(source_path)
+    proposal_dir.mkdir(parents=True, exist_ok=True)
+    proposal = {
+        "schema_version": 1,
+        "skill": skill,
+        "operation": operation,
+        "base_source_sha": entry.get("source_sha"),
+        "base_source_fingerprint": entry.get("source_content_sha256"),
+        "runtime_path": str(runtime_path),
+        "origin": origin,
+        "session_id": session_id or "",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": dict(payload),
+    }
+    proposal_path = proposal_dir / f"{skill}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    proposal_path.write_text(json.dumps(proposal, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return proposal_path
+
+
+def guard_runtime_skill_mutation(
+    *,
+    skill: str,
+    runtime_path: Path,
+    operation: str,
+    payload: Mapping[str, Any] | None = None,
+    origin: str = "foreground",
+    session_id: str = "",
+    runtime_root: Path | None = None,
+) -> dict[str, Any] | None:
+    """Deny ordinary writes; stage background-review writes; allow deployment."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    managed = is_governance_managed_skill(runtime_path, root)
+    if not managed or _canonical_deployment.get():
+        return None
+    if origin == "background_review":
+        proposal_path = stage_self_improvement_proposal(
+            skill=skill, runtime_path=runtime_path, operation=operation,
+            payload=payload or {}, origin=origin, session_id=session_id,
+            runtime_root=root,
+        )
+        logger.warning("managed skill mutation staged skill=%s operation=%s runtime_path=%s origin=%s managed=true action=STAGED proposal_path=%s", skill, operation, runtime_path, origin, proposal_path)
+        return {"success": False, "error": "managed_skill_runtime_immutable", "skill": skill, "runtime_path": str(runtime_path), "authoring_required": True, "action": "STAGED", "proposal_path": str(proposal_path)}
+    logger.warning("managed skill mutation denied skill=%s operation=%s runtime_path=%s origin=%s managed=true action=DENIED", skill, operation, runtime_path, origin)
+    return {"success": False, "error": "managed_skill_runtime_immutable", "skill": skill, "runtime_path": str(runtime_path), "authoring_required": True, "action": "DENIED"}
 
 
 def classify_skill_identifier(identifier: str, canonical_names: set[str]) -> str:
@@ -111,6 +230,19 @@ def build_manifest(runtime_root: Path, declarations: Mapping[str, Mapping[str, A
 
 
 def deploy_runtime_authority(
+    runtime_root: Path,
+    declarations: Mapping[str, Mapping[str, Any]],
+    *,
+    allow_runtime_drift: bool = False,
+) -> dict[str, Any]:
+    """Deploy through explicit canonical authority context."""
+    with canonical_deployment_authority():
+        return _deploy_runtime_authority(
+            runtime_root, declarations, allow_runtime_drift=allow_runtime_drift
+        )
+
+
+def _deploy_runtime_authority(
     runtime_root: Path,
     declarations: Mapping[str, Mapping[str, Any]],
     *,

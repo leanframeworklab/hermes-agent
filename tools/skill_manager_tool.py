@@ -161,6 +161,21 @@ def _pinned_guard(name: str) -> Optional[str]:
     return None
 
 
+def _managed_mutation_guard(name: str, skill_dir: Path, operation: str, payload: Optional[Dict[str, Any]] = None):
+    """Enforce manifest-owned runtime immutability at every manager write."""
+    from tools.skill_authority import guard_runtime_skill_mutation
+    from tools.skill_provenance import get_current_write_origin
+
+    return guard_runtime_skill_mutation(
+        skill=name,
+        runtime_path=skill_dir,
+        runtime_root=_containing_skills_root(skill_dir),
+        operation=operation,
+        payload=payload or {},
+        origin=get_current_write_origin(),
+    )
+
+
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
@@ -554,6 +569,9 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
         return {"success": False, "error": _skill_not_found_error(name)}
 
     skill_md = existing["path"] / "SKILL.md"
+    guard = _managed_mutation_guard(name, existing["path"], "edit", {"file_path": "SKILL.md", "content": content})
+    if guard:
+        return guard
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
@@ -651,6 +669,15 @@ def _patch_skill(
                 "error": f"Patch would break SKILL.md structure: {err}",
             }
 
+    guard = _managed_mutation_guard(
+        name,
+        skill_dir,
+        "patch",
+        {"file_path": file_path or "SKILL.md", "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "proposed_content": new_content},
+    )
+    if guard:
+        return guard
+
     original_content = content  # for rollback
     _atomic_write_text(target, new_content)
 
@@ -705,6 +732,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
             }
 
     skill_dir = existing["path"]
+    guard = _managed_mutation_guard(name, skill_dir, "delete", {"absorbed_into": absorbed_into})
+    if guard:
+        return guard
     skills_root = _containing_skills_root(skill_dir)
     shutil.rmtree(skill_dir)
 
@@ -754,6 +784,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
+    guard = _managed_mutation_guard(name, existing["path"], "write_file", {"file_path": file_path, "file_content": file_content})
+    if guard:
+        return guard
     target.parent.mkdir(parents=True, exist_ok=True)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
@@ -804,6 +837,10 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
             "error": f"File '{file_path}' not found in skill '{name}'.",
             "available_files": available if available else None,
         }
+
+    guard = _managed_mutation_guard(name, skill_dir, "remove_file", {"file_path": file_path})
+    if guard:
+        return guard
 
     target.unlink()
 

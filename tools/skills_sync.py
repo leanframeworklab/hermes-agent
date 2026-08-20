@@ -506,6 +506,15 @@ def sync_skills(quiet: bool = False) -> dict:
         dest = _compute_relative_dest(skill_src, bundled_dir)
         bundled_hash = _dir_hash(skill_src)
 
+        # Governance manifest owns these runtime artifacts; bundled sync is
+        # not canonical deployment authority and must never replace them.
+        from tools.skill_authority import is_governance_managed_skill
+        if is_governance_managed_skill(dest, SKILLS_DIR):
+            user_modified.append(skill_name)
+            if not quiet:
+                print(f"  ~ {skill_name} (governance-managed, canonical deployment required)")
+            continue
+
         if skill_name not in manifest:
             # ── New skill — never offered before ──
             try:
