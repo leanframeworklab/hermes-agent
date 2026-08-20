@@ -527,6 +527,15 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
+    from tools.path_security import validate_within_dir
+    path_error = validate_within_dir(skill_dir, SKILLS_DIR)
+    if path_error:
+        return {"success": False, "error": path_error}
+    guard = _managed_mutation_guard(
+        name, skill_dir, "create", {"category": category, "content": content}
+    )
+    if guard:
+        return guard
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     # Write SKILL.md atomically

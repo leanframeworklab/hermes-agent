@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -29,6 +30,16 @@ CRITICAL_SKILLS = (
 MANIFEST_FILENAME = ".governance_manifest.json"
 
 _canonical_deployment = contextvars.ContextVar("canonical_skill_deployment", default=False)
+
+
+@dataclass(frozen=True)
+class ManagedSkillMutationDecision:
+    """Central, caller-independent decision for one runtime mutation."""
+
+    allowed: bool
+    managed: bool
+    action: str
+    reason: str
 
 
 @contextlib.contextmanager
@@ -73,6 +84,55 @@ def is_governance_managed_skill(path_or_name: str | Path, runtime_root: Path | N
         return False
     entries = manifest.get("skills", {})
     return isinstance(entries, Mapping) and isinstance(entries.get(str(path_or_name)), Mapping)
+
+
+def check_managed_runtime_mutation(
+    target_path_or_skill: str | Path,
+    operation: str,
+    mutation_authority: object = None,
+    runtime_root: Path | None = None,
+) -> ManagedSkillMutationDecision:
+    """Check runtime immutability before any ordinary skill filesystem write.
+
+    Caller labels are informational only. Only the private deployment context
+    can authorize a managed mutation; all other callers receive the same deny
+    decision. Invalid manifests fail closed for known critical skill names.
+    """
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    target = Path(target_path_or_skill)
+    looks_like_path = isinstance(target_path_or_skill, Path) or os.sep in str(target_path_or_skill)
+    managed = is_governance_managed_skill(target, root) if looks_like_path else is_governance_managed_skill(str(target_path_or_skill), root)
+    if not managed:
+        # Missing/invalid manifest must not make known governance skills
+        # writable merely because parsing failed.
+        try:
+            manifest = json.loads(manifest_path(root).read_text(encoding="utf-8"))
+            manifest_valid = manifest.get("schema_version") == 1 and isinstance(manifest.get("skills"), Mapping)
+        except (OSError, json.JSONDecodeError):
+            manifest_valid = False
+        critical_path = False
+        if looks_like_path:
+            try:
+                relative_parts = target.resolve().relative_to(root).parts
+                critical_path = any(part in CRITICAL_SKILLS for part in relative_parts)
+            except (OSError, ValueError):
+                critical_path = False
+        if not manifest_valid and (
+            (not looks_like_path and str(target_path_or_skill) in CRITICAL_SKILLS)
+            or critical_path
+        ):
+            managed = True
+            reason = "governance manifest unavailable for critical skill"
+        else:
+            reason = "target is not governance-managed"
+    else:
+        reason = "governance manifest declares runtime skill"
+
+    if not managed:
+        return ManagedSkillMutationDecision(True, False, "ALLOW", reason)
+    if _canonical_deployment.get():
+        return ManagedSkillMutationDecision(True, True, "ALLOW", "canonical deployment authority")
+    return ManagedSkillMutationDecision(False, True, "DENY", reason)
 
 
 def _proposal_root(source_path: Path) -> Path:
@@ -128,8 +188,12 @@ def guard_runtime_skill_mutation(
 ) -> dict[str, Any] | None:
     """Deny ordinary writes; stage background-review writes; allow deployment."""
     root = (runtime_root or (get_hermes_home() / "skills")).resolve()
-    managed = is_governance_managed_skill(runtime_path, root)
-    if not managed or _canonical_deployment.get():
+    decision = check_managed_runtime_mutation(
+        runtime_path, operation, mutation_authority=origin, runtime_root=root
+    )
+    if decision.allowed:
+        return None
+    if not decision.managed:
         return None
     if origin == "background_review":
         proposal_path = stage_self_improvement_proposal(
