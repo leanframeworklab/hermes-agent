@@ -150,6 +150,8 @@ def build_turn_context(
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
+    agent._governance_turn_halted = False
+    agent._governance_terminal_receipt = None
     from agent.governed_skill_state import GovernedSkillState, classify_governed_mission
     _governed = classify_governed_mission(user_message)
     _authority = {"valid": True, "errors": []}

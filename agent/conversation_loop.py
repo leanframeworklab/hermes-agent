@@ -3706,6 +3706,14 @@ def run_conversation(
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
+                if getattr(agent, "_governance_turn_halted", False):
+                    _turn_exit_reason = "terminal_governance_failure"
+                    final_response = getattr(
+                        agent, "_governance_terminal_receipt", "governed mission blocked"
+                    )
+                    messages.append({"role": "assistant", "content": final_response})
+                    break
+
                 if getattr(agent, "_action_commit_blocked", False):
                     _turn_exit_reason = "action_commit_integrity_failure"
                     final_response = "Action outcome persistence failed; continuation is blocked."

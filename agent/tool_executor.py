@@ -57,6 +57,13 @@ def _governance_preflight(agent, function_name: str, function_args: dict) -> Opt
     if state is None:
         return None
     decision = state.before_tool(function_name, function_args)
+    if not decision.allowed and state.is_terminal_failure:
+        agent._governance_turn_halted = True
+        agent._governance_terminal_receipt = decision.result
+        logger.warning(
+            "terminal governance failure phase=%s reason=%s turn_halted=true",
+            state.phase.value, state.failure_reason,
+        )
     return None if decision.allowed else decision.result
 
 
@@ -823,6 +830,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
+        if getattr(agent, "_governance_turn_halted", False):
+            break
         # SAFETY: check interrupt BEFORE starting each tool.
         # If the user sent "stop" during a previous tool's execution,
         # do NOT start any more tools -- skip them all immediately.

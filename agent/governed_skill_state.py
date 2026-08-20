@@ -79,6 +79,17 @@ class GovernedSkillState:
         return self.phase is GovernancePhase.GOVERNANCE_PREREQUISITES_PASSED
 
     @property
+    def is_terminal_failure(self) -> bool:
+        return self.phase in {
+            GovernancePhase.ROUTER_FAILED,
+            GovernancePhase.DECOMPOSER_FAILED,
+            GovernancePhase.MANDATORY_SKILL_MISSING,
+            GovernancePhase.MANDATORY_SKILL_RESOLUTION_FAILED,
+            GovernancePhase.MANDATORY_SKILL_LOAD_FAILED,
+            GovernancePhase.MANDATORY_GATE_ORDER_INVALID,
+        }
+
+    @property
     def blocked(self) -> bool:
         return self.governed and not self.downstream_allowed
 
@@ -186,5 +197,6 @@ class GovernedSkillState:
                 "required_gates": gates,
                 "downstream_execution_allowed": False,
                 "reason": self.failure_reason or reason,
+                "turn_halted": self.is_terminal_failure,
             },
         }, ensure_ascii=False)
