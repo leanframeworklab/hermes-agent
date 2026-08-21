@@ -229,6 +229,7 @@ def test_denied_terminal_does_not_poison_exact_read(tmp_path):
     allowed = state.before_tool("read_file", {"path": str(path), "allowed_roots": [str(tmp_path)]})
 
     assert denied["scope"] == "ACTION"
+    assert denied["block_type"] == "ACTION_BLOCKED"
     assert denied["mission_still_valid"] is True
     assert allowed.allowed is True
 
@@ -286,4 +287,5 @@ def test_true_authority_failure_is_mission_blocked():
     payload = json.loads(state.before_tool("terminal", {"command": "git status --short"}).result)
 
     assert payload["scope"] == "MISSION"
+    assert payload["block_type"] == "MISSION_BLOCKED"
     assert payload["mission_still_valid"] is False

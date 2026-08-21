@@ -53,6 +53,11 @@ class DenialScope(str, Enum):
     MISSION = "MISSION"
 
 
+class DenialType(str, Enum):
+    ACTION_BLOCKED = "ACTION_BLOCKED"
+    MISSION_BLOCKED = "MISSION_BLOCKED"
+
+
 ORCHESTRATOR = "lah-workflow-small-model"
 MANDATORY_SKILLS = {
     GovernancePhase.ORCHESTRATOR_REQUIRED: ("entry", ORCHESTRATOR),
@@ -333,6 +338,8 @@ class GovernedSkillState:
             "reason_code": reason,
             "hard_block": True,
             "scope": scope.value,
+            "block_type": (DenialType.ACTION_BLOCKED.value if scope is DenialScope.ACTION
+                           else DenialType.MISSION_BLOCKED.value),
             "state": self.phase.value,
             "detail": reason_detail,
             "tool": tool_name,
