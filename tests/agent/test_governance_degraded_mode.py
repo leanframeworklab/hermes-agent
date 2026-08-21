@@ -18,8 +18,9 @@ def test_drift_keeps_diagnostics_and_codegraph_available():
 
     assert _governance_preflight(agent, "skill_view", {"name": "lah-repo-router"}) is None
     assert _governance_preflight(agent, "skills_list", {}) is None
-    assert _governance_preflight(agent, "search_files", {"query": "ROUTER_REQUIRED"}) is None
-    assert _governance_preflight(agent, "codegraph_query", {"query": "tool dispatch"}) is None
+    assert _governance_preflight(agent, "search_files", {"query": "ROUTER_REQUIRED", "exact": True}) is None
+    codegraph_block = json.loads(_governance_preflight(agent, "codegraph_query", {"query": "tool dispatch"}))
+    assert codegraph_block["reason_code"] == "BLOCK_PATH_ESCAPE"
 
 
 def test_drift_blocks_external_mutation_with_authority_receipt():

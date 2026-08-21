@@ -153,13 +153,26 @@ def build_turn_context(
     from agent.governed_skill_state import GovernedSkillState, classify_governed_mission
     _governed = classify_governed_mission(user_message)
     _authority = {"valid": True, "errors": []}
+    _bootstrap_packet = None
+    _native_ling3 = "lah-workflow-ling3" in user_message.lower() or "ling-3.0-flash" in user_message.lower()
     if _governed:
         from tools.skill_authority import load_runtime_authority_status
         _authority = load_runtime_authority_status()
+        if _native_ling3:
+            from agent.ling3_bootstrap import compile_bootstrap_packet
+            try:
+                _bootstrap_packet = compile_bootstrap_packet(
+                    mission_id=getattr(agent, "session_id", "") or "session",
+                    mission_text=user_message,
+                )
+            except ValueError as exc:
+                logger.warning("Ling3 bootstrap packet unavailable: %s", exc)
     agent._governed_skill_state = GovernedSkillState(
         governed=_governed,
         authority_valid=bool(_authority.get("valid")),
         authority_errors=tuple(_authority.get("errors") or ()),
+        bootstrap_packet=_bootstrap_packet,
+        native_workflow=_native_ling3,
     )
     agent._vision_supported = True
 

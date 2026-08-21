@@ -28,7 +28,7 @@ def test_malformed_router_cannot_satisfy_gate():
     decision = state.before_tool("skill_view", {"name": "lah-stack/lah-repo-router"})
     assert decision.allowed is False
     assert state.phase is GovernancePhase.ORCHESTRATOR_REQUIRED
-    assert "lah-workflow-small-model" in decision.result
+    assert json.loads(decision.result)["reason_code"] == "BLOCK_PATH_ESCAPE"
 
 
 def test_failed_router_blocks_downstream_and_decomposer():
@@ -102,7 +102,7 @@ def test_invalid_authority_enters_read_only_degraded_mode():
 
     assert state.mode is GovernanceMode.DEGRADED_READ_ONLY
     assert state.before_tool("read_file", {"path": "agent/governed_skill_state.py"}).allowed
-    assert state.before_tool("codegraph_query", {"query": "GovernanceMode"}).allowed
+    assert json.loads(state.before_tool("codegraph_query", {"query": "GovernanceMode"}).result)["reason_code"] == "BLOCK_PATH_ESCAPE"
     assert state.before_tool("terminal", {"command": "git status --short"}).allowed
 
 
