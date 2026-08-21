@@ -119,11 +119,16 @@ def check_managed_runtime_command(
     if not isinstance(entries, Mapping):
         return ManagedSkillMutationDecision(True, False, "ALLOW", "manifest has no skills")
 
+    # Stderr suppression is read-only plumbing, not a write to the managed
+    # tree. Remove it before looking for output redirection. Likewise, plain
+    # ``sed -n`` is a read command; only in-place sed is a mutation here.
+    command_for_mutation_scan = re.sub(r"\s*\d?>/dev/null\b", "", command)
     mutation_hint = bool(
         re.search(
-            r">>?\s*|\b(?:cp|mv|install|rm|rmdir|mkdir|touch|tee|sed|perl)\b"
+            r">>?\s*|\b(?:cp|mv|install|rm|rmdir|mkdir|touch|tee|perl)\b"
+            r"|\bsed\s+-[^\s]*i\b"
             r"|\b(?:write_text|write_bytes|writeFile|unlink|rename|copy|move)\s*\(",
-            command,
+            command_for_mutation_scan,
         )
     )
     if not mutation_hint:

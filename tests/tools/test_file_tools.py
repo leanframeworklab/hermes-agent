@@ -14,6 +14,22 @@ from tools.file_tools import (
 
 
 class TestReadFileHandler:
+    def test_registry_dispatch_preserves_absolute_managed_skill_path(self):
+        import tools.file_tools  # noqa: F401 - registers read_file
+        from tools.registry import registry
+
+        path = "/home/deploy/.hermes/skills/lah-stack/lah-workflow-ling3/SKILL.md"
+        result = json.loads(
+            registry.dispatch(
+                "read_file",
+                {"path": path, "offset": 1, "limit": 20},
+                task_id="p6-dispatch-integration",
+            )
+        )
+
+        assert "error" not in result
+        assert "name: lah-workflow-ling3" in result["content"]
+
     @patch("tools.file_tools._get_file_ops")
     def test_returns_file_content(self, mock_get):
         mock_ops = MagicMock()

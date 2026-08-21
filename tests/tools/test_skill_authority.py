@@ -2,6 +2,7 @@ import json
 
 from tools.skill_authority import (
     build_manifest,
+    check_managed_runtime_command,
     classify_skill_identifier,
     deploy_runtime_authority,
     validate_runtime_authority,
@@ -80,6 +81,33 @@ def test_identifier_classifier_keeps_plugin_and_local_contracts_distinct():
     assert classify_skill_identifier("lah-repo-router", names) == "VALID_CANONICAL_NAME"
     assert classify_skill_identifier("lah-stack/lah-repo-router", names) == "CATEGORY_PATH_USED_AS_IDENTIFIER"
     assert classify_skill_identifier("superpowers:writing-plans", names) == "VALID_PLUGIN_NAMESPACE"
+
+
+def test_managed_runtime_allows_read_only_shell_commands(tmp_path):
+    runtime = tmp_path / "runtime"
+    skill = _skill(runtime, "lah-stack", "lah-workflow-ling3")
+    manifest = build_manifest(
+        runtime,
+        {"lah-workflow-ling3": {"source_path": str(skill), "source_repo": "test"}},
+    )
+    (runtime / ".governance_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert manifest["skills"]["lah-workflow-ling3"]["runtime_path"] == "lah-stack/lah-workflow-ling3"
+
+    decision = check_managed_runtime_command(
+        f"wc -c < '{skill / 'SKILL.md'}' 2>/dev/null",
+        cwd=str(runtime),
+        runtime_root=runtime,
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == "read-only shell command"
+
+    mutation = check_managed_runtime_command(
+        f"sed -i 's/body/changed/' '{skill / 'SKILL.md'}'",
+        cwd=str(runtime),
+        runtime_root=runtime,
+    )
+    assert mutation.allowed is False
 
 
 def test_deployment_refuses_unexpected_divergent_target(tmp_path):
