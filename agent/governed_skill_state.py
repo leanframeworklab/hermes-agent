@@ -135,6 +135,7 @@ class GovernedSkillState:
     bootstrap_packet: Mapping[str, Any] | None = None
     native_workflow: bool = False
     _denial_fingerprints: dict[str, int] = field(default_factory=dict, repr=False)
+    _terminal_hard_block_reason: str | None = field(default=None, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -171,6 +172,19 @@ class GovernedSkillState:
             if not self.governed:
                 return GovernanceDecision(True)
             args = dict(args or {})
+            if self._terminal_hard_block_reason and tool_name in {
+                "read_file", "search_files", "terminal", "execute_code",
+                "codegraph_query", "codegraph_explore",
+            }:
+                return GovernanceDecision(
+                    False,
+                    self._hard_receipt(
+                        "WORKFLOW_CONVERGENCE_STOP",
+                        f"terminal hard safety denial: {self._terminal_hard_block_reason}",
+                        tool_name,
+                        args,
+                    ),
+                )
             capability = classify_tool_capability(tool_name, args)
             try:
                 spec = classify_operation(tool_name, args)
@@ -185,6 +199,11 @@ class GovernedSkillState:
                         roots.append(self.canonical_repo)
                     if not roots:
                         roots.append(os.getcwd())
+                    if self.authority_valid:
+                        from tools.skill_authority import manifest_path
+                        managed_skill_root = str(manifest_path().parent)
+                        if managed_skill_root not in roots:
+                            roots.append(managed_skill_root)
                     if roots:
                         policy_args["allowed_roots"] = roots
                 if tool_name in {"codegraph_query", "codegraph_explore"} and "project_path" not in policy_args and self.canonical_repo:
@@ -192,6 +211,8 @@ class GovernedSkillState:
                 policy = evaluate_read_only(tool_name, policy_args)
                 if policy.decision in {ReadOnlyDecision.ALLOW, ReadOnlyDecision.ALLOW_WITH_REDACTION}:
                     return GovernanceDecision(True)
+                if tool_name in {"read_file", "search_files"}:
+                    self._terminal_hard_block_reason = policy.decision.value
                 return GovernanceDecision(False, self._hard_receipt(policy.decision.value, policy.reason, tool_name, args))
 
             if spec is None and capability is ToolCapability.READ_ONLY:

@@ -157,3 +157,50 @@ def test_dispatch_preflight_allows_safe_read_before_bootstrap(tmp_path):
     assert _governance_preflight(
         Agent(), "read_file", {"path": str(path), "allowed_roots": [str(tmp_path)]}
     ) is None
+
+
+def test_validated_managed_skill_root_allows_exact_read_without_explicit_root(tmp_path, monkeypatch):
+    managed_root = tmp_path / "skills"
+    skill_file = managed_root / "lah-stack" / "lah-workflow-ling3" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: lah-workflow-ling3\n---\n", encoding="utf-8")
+    monkeypatch.setattr("tools.skill_authority.get_hermes_home", lambda: tmp_path)
+
+    state = GovernedSkillState(governed=True, authority_valid=True)
+
+    assert state.before_tool("read_file", {"path": str(skill_file)}).allowed is True
+
+
+def test_managed_skill_root_does_not_allow_secret_or_sibling_paths(tmp_path, monkeypatch):
+    managed_root = tmp_path / "skills"
+    safe_file = managed_root / "lah-stack" / "lah-workflow-ling3" / "SKILL.md"
+    safe_file.parent.mkdir(parents=True)
+    safe_file.write_text("safe", encoding="utf-8")
+    secret_file = managed_root / ".env"
+    secret_file.write_text("TOKEN=synthetic", encoding="utf-8")
+    sibling = tmp_path / ".hermes" / ".env"
+    sibling.parent.mkdir()
+    sibling.write_text("outside", encoding="utf-8")
+    monkeypatch.setattr("tools.skill_authority.get_hermes_home", lambda: tmp_path)
+
+    state = GovernedSkillState(governed=True, authority_valid=True)
+
+    secret = json.loads(state.before_tool("read_file", {"path": str(secret_file)}).result)
+    outside_state = GovernedSkillState(governed=True, authority_valid=True)
+    outside = json.loads(outside_state.before_tool("read_file", {"path": str(sibling)}).result)
+    assert secret["reason_code"] == "BLOCK_SECRET"
+    assert outside["reason_code"] == "BLOCK_PATH_ESCAPE"
+
+
+def test_hard_path_denial_stops_alternate_terminal_probe(tmp_path):
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    state = GovernedSkillState(governed=True)
+
+    first = json.loads(state.before_tool("read_file", {"path": str(outside), "allowed_roots": [str(tmp_path)]}).result)
+    second = json.loads(state.before_tool("terminal", {"command": "cat /tmp/outside.txt"}).result)
+
+    assert first["reason_code"] == "BLOCK_PATH_ESCAPE"
+    assert second["reason_code"] == "WORKFLOW_CONVERGENCE_STOP"
+    assert second["hard_block"] is True
+    assert second["retry_other_tools"] is False
