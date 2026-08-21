@@ -446,6 +446,13 @@ def _resolve_skill_target(skill_dir: Path, file_path: str) -> Tuple[Optional[Pat
     return target, None
 
 
+def _managed_runtime_error(path: Path, operation: str) -> Optional[str]:
+    from tools.skill_authority import check_managed_runtime_mutation
+
+    decision = check_managed_runtime_mutation(path, operation)
+    return "managed_skill_runtime_immutable" if not decision.allowed else None
+
+
 def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -> None:
     """
     Atomically write text content to a file.
@@ -554,6 +561,9 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
         return {"success": False, "error": _skill_not_found_error(name)}
 
     skill_md = existing["path"] / "SKILL.md"
+    managed_error = _managed_runtime_error(skill_md, "edit")
+    if managed_error:
+        return {"success": False, "error": managed_error}
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
@@ -609,6 +619,10 @@ def _patch_skill(
 
     if not target.exists():
         return {"success": False, "error": f"File not found: {target.relative_to(skill_dir)}"}
+
+    managed_error = _managed_runtime_error(target, "patch")
+    if managed_error:
+        return {"success": False, "error": managed_error}
 
     content = target.read_text(encoding="utf-8")
 
@@ -705,6 +719,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
             }
 
     skill_dir = existing["path"]
+    managed_error = _managed_runtime_error(skill_dir, "delete")
+    if managed_error:
+        return {"success": False, "error": managed_error}
     skills_root = _containing_skills_root(skill_dir)
     shutil.rmtree(skill_dir)
 
@@ -754,6 +771,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
+    managed_error = _managed_runtime_error(target, "write")
+    if managed_error:
+        return {"success": False, "error": managed_error}
     target.parent.mkdir(parents=True, exist_ok=True)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
@@ -790,6 +810,9 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     target, err = _resolve_skill_target(skill_dir, file_path)
     if err:
         return {"success": False, "error": err}
+    managed_error = _managed_runtime_error(target, "remove")
+    if managed_error:
+        return {"success": False, "error": managed_error}
     if not target.exists():
         # List what's actually there for the model to see
         available = []

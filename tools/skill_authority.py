@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +24,129 @@ CRITICAL_SKILLS = (
     "mission-decomposer",
 )
 MANIFEST_FILENAME = ".governance_manifest.json"
+
+
+@dataclass(frozen=True)
+class ManagedSkillMutationDecision:
+    """Central, caller-independent decision for one runtime mutation."""
+
+    allowed: bool
+    managed: bool
+    action: str
+    reason: str
+
+
+def _manifest_entry_for_path(
+    path: Path, runtime_root: Path
+) -> tuple[str, Mapping[str, Any]] | None:
+    try:
+        relative = Path(os.path.abspath(path)).relative_to(
+            Path(os.path.abspath(runtime_root))
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        manifest = json.loads(manifest_path(runtime_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entries = manifest.get("skills", {})
+    if not isinstance(entries, Mapping):
+        return None
+    for name, entry in entries.items():
+        if not isinstance(entry, Mapping):
+            continue
+        declared = Path(str(entry.get("runtime_path", "")))
+        if relative == declared or declared in relative.parents:
+            return str(name), entry
+    return None
+
+
+def is_governance_managed_skill(
+    path_or_name: str | Path, runtime_root: Path | None = None
+) -> bool:
+    """Return true when name/path is declared as a managed runtime artifact."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    if isinstance(path_or_name, Path) or os.sep in str(path_or_name):
+        return _manifest_entry_for_path(Path(path_or_name), root) is not None
+    try:
+        manifest = json.loads(manifest_path(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    entries = manifest.get("skills", {})
+    return isinstance(entries, Mapping) and isinstance(
+        entries.get(str(path_or_name)), Mapping
+    )
+
+
+def check_managed_runtime_mutation(
+    target_path_or_skill: str | Path,
+    operation: str,
+    runtime_root: Path | None = None,
+) -> ManagedSkillMutationDecision:
+    """Deny ordinary mutation of manifest-declared runtime skill trees."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    target = Path(target_path_or_skill)
+    looks_like_path = isinstance(target_path_or_skill, Path) or os.sep in str(
+        target_path_or_skill
+    )
+    managed = (
+        is_governance_managed_skill(target, root)
+        if looks_like_path
+        else is_governance_managed_skill(str(target_path_or_skill), root)
+    )
+    if not managed:
+        return ManagedSkillMutationDecision(
+            True, False, "ALLOW", "target is not governance-managed"
+        )
+    return ManagedSkillMutationDecision(
+        False, True, "DENY", f"managed runtime mutation: {operation}"
+    )
+
+
+def check_managed_runtime_command(
+    command: str,
+    *,
+    cwd: str | Path = "",
+    runtime_root: Path | None = None,
+) -> ManagedSkillMutationDecision:
+    """Fail closed for shell commands that target declared runtime trees."""
+    root = (runtime_root or (get_hermes_home() / "skills")).resolve()
+    try:
+        manifest = json.loads(manifest_path(root).read_text(encoding="utf-8"))
+        entries = manifest.get("skills", {})
+    except (OSError, json.JSONDecodeError):
+        return ManagedSkillMutationDecision(True, False, "ALLOW", "manifest unavailable")
+    if not isinstance(entries, Mapping):
+        return ManagedSkillMutationDecision(True, False, "ALLOW", "manifest has no skills")
+
+    mutation_hint = bool(
+        re.search(
+            r">>?\s*|\b(?:cp|mv|install|rm|rmdir|mkdir|touch|tee|sed|perl)\b"
+            r"|\b(?:write_text|write_bytes|writeFile|unlink|rename|copy|move)\s*\(",
+            command,
+        )
+    )
+    if not mutation_hint:
+        return ManagedSkillMutationDecision(True, False, "ALLOW", "read-only shell command")
+
+    resolved_cwd = Path(cwd).resolve() if cwd else None
+    for entry in entries.values():
+        if not isinstance(entry, Mapping) or not entry.get("runtime_path"):
+            continue
+        skill_dir = (root / str(entry["runtime_path"])).resolve()
+        if str(skill_dir) in command or str(root) in command:
+            return ManagedSkillMutationDecision(
+                False, True, "DENY", "managed runtime shell target"
+            )
+        if resolved_cwd is not None:
+            try:
+                resolved_cwd.relative_to(skill_dir)
+            except ValueError:
+                continue
+            return ManagedSkillMutationDecision(
+                False, True, "DENY", "managed runtime shell cwd"
+            )
+    return ManagedSkillMutationDecision(True, False, "ALLOW", "shell target unmanaged")
 
 
 def classify_skill_identifier(identifier: str, canonical_names: set[str]) -> str:

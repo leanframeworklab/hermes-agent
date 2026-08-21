@@ -148,6 +148,13 @@ def _is_write_denied(path: str) -> bool:
     return _shared_is_write_denied(path)
 
 
+def _managed_runtime_write_error(path: str, operation: str) -> str | None:
+    from tools.skill_authority import check_managed_runtime_mutation
+
+    decision = check_managed_runtime_mutation(path, operation)
+    return "managed_skill_runtime_immutable" if not decision.allowed else None
+
+
 # =============================================================================
 # Result Data Classes
 # =============================================================================
@@ -1151,6 +1158,9 @@ class ShellFileOperations(FileOperations):
 
     def _python_delete(self, path: str, recursive: bool) -> WriteResult:
         path = self._expand_path(path)
+        managed_error = _managed_runtime_write_error(path, "delete")
+        if managed_error:
+            return WriteResult(error=managed_error)
         if _is_write_denied(path):
             return WriteResult(error=f"Delete denied: {path} is a protected path")
 
@@ -1197,6 +1207,9 @@ class ShellFileOperations(FileOperations):
         src = self._expand_path(src)
         dst = self._expand_path(dst)
         for p in (src, dst):
+            managed_error = _managed_runtime_write_error(p, "move")
+            if managed_error:
+                return WriteResult(error=managed_error)
             if _is_write_denied(p):
                 return WriteResult(error=f"Move denied: {p} is a protected path")
         result = self._exec(
@@ -1234,6 +1247,10 @@ class ShellFileOperations(FileOperations):
         """
         # Expand ~ and other shell paths
         path = self._expand_path(path)
+
+        managed_error = _managed_runtime_write_error(path, "write")
+        if managed_error:
+            return WriteResult(error=managed_error)
 
         # Block writes to sensitive paths
         if _is_write_denied(path):
@@ -1380,6 +1397,10 @@ class ShellFileOperations(FileOperations):
         """
         # Expand ~ and other shell paths
         path = self._expand_path(path)
+
+        managed_error = _managed_runtime_write_error(path, "patch")
+        if managed_error:
+            return PatchResult(error=managed_error)
 
         # Block writes to sensitive paths
         if _is_write_denied(path):

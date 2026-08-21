@@ -836,6 +836,14 @@ class BaseEnvironment(ABC):
         rewrite_compound_background: bool = True,
     ) -> dict:
         """Execute a command, return {"output": str, "returncode": int}."""
+        from tools.skill_authority import check_managed_runtime_command
+
+        managed_decision = check_managed_runtime_command(command, cwd=cwd or self.cwd)
+        if not managed_decision.allowed:
+            return {
+                "output": "managed_skill_runtime_immutable",
+                "returncode": 1,
+            }
         self._before_execute()
 
         exec_command, sudo_stdin = self._prepare_command(command)
