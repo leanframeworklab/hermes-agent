@@ -3,16 +3,15 @@
  * Hermes Certified Startup Orchestrator v1
  *
  * Integrates Certified Architecture Context + Mission Resume Packet
- * + mandatory CodeGraph bootstrap into the lah-workflow-small-model
+ * + just-in-time CodeGraph discovery into the lah-workflow-small-model
  * startup sequence.
  *
- * Startup order (P11 + CodeGraph mandatory bootstrap):
+ * Startup order (P11 + just-in-time CodeGraph):
  *   1. LOAD_CONTEXT
  *   2. VERIFY_FINGERPRINT
  *   3. LOAD_RESUME_PACKET
- *   4. CODEGRAPH_BOOTSTRAP  ← NEW: mandatory CodeGraph freshness check
- *                              + mission context packet load
- *   5. IDENTIFY_NEXT_ACTION
+ *   4. IDENTIFY_NEXT_ACTION
+ *   5. targeted CodeGraph only for genuine structural unknowns
  *   6. EXECUTE
  *
  * Only if:
@@ -28,7 +27,8 @@
 "use strict";
 
 const { execFileSync } = require("child_process");
-const { join } = require("path");
+const { existsSync } = require("fs");
+const { isAbsolute, join } = require("path");
 const { CertifiedArchitectureContext } = require("./certified-architecture-context");
 const { MissionResumePacket } = require("./mission-resume-packet");
 const {
@@ -37,12 +37,11 @@ const {
   normalizeReadOnlyDecomposerResult,
 } = require("./certified-execution-path-packet");
 
-// ─── CodeGraph Bootstrap ────────────────────────────────────
-// Paths are relative to the openclaw-runtime repo root,
-// resolved from the skill directory via process.cwd() or
-// a known relative path from the startup orchestrator.
+// ─── CodeGraph discovery ─────────────────────────────────────
+// Tool implementation remains external to this governed skill. Repository
+// identity always comes from the certified execution-path packet.
 
-const OPENCLAW_RUNTIME_ROOT = join(
+const CODEGRAPH_TOOL_ROOT = join(
   __dirname,
   "..",
   "..",
@@ -54,28 +53,42 @@ const OPENCLAW_RUNTIME_ROOT = join(
 );
 
 const CODEGRAPH_TOOLS_DIR = join(
-  OPENCLAW_RUNTIME_ROOT,
+  CODEGRAPH_TOOL_ROOT,
   "tools",
   "codegraph"
 );
 
-const CODEGRAPH_DIR = join(OPENCLAW_RUNTIME_ROOT, ".codegraph");
+function resolveCodeGraphRoot(canonicalRepo) {
+  if (!canonicalRepo || !isAbsolute(canonicalRepo) || !existsSync(canonicalRepo)) {
+    return { available: false, error: "CODEGRAPH_CANONICAL_REPO_UNAVAILABLE", canonical_repo: canonicalRepo || null };
+  }
+  const codegraphDir = join(canonicalRepo, ".codegraph");
+  const indexed = existsSync(join(codegraphDir, "freshness.json"))
+    || existsSync(join(codegraphDir, "snapshot.json"))
+    || existsSync(join(codegraphDir, "codegraph.db"));
+  if (!existsSync(codegraphDir) || !indexed) {
+    return { available: false, error: "CODEGRAPH_CANONICAL_REPO_UNAVAILABLE", canonical_repo: canonicalRepo, codegraph_dir: codegraphDir };
+  }
+  return { available: true, canonical_repo: canonicalRepo, codegraph_dir: codegraphDir };
+}
 
 /**
  * Run the CodeGraph freshness check via the existing CLI tool.
  * Returns { fresh: boolean, error?: string, output?: string }
  */
-function checkCodeGraphFreshness() {
+function checkCodeGraphFreshness(canonicalRepo, runner = execFileSync) {
+  const root = resolveCodeGraphRoot(canonicalRepo);
+  if (!root.available) return { fresh: false, ...root };
   try {
-    const result = execFileSync(
+    const result = runner(
       "node",
-      [join(CODEGRAPH_TOOLS_DIR, "freshness-check.js"), "--repo", "openclaw"],
+      [join(CODEGRAPH_TOOLS_DIR, "freshness-check.js"), "--repo", canonicalRepo],
       { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }
     );
     return { fresh: true, output: result };
   } catch (err) {
     // exit code 1 = missing or stale
-    return { fresh: false, error: err.message, output: err.stdout || "" };
+    return { fresh: false, error: err.message, code: err.status ?? err.code, output: err.stdout || "" };
   }
 }
 
@@ -83,18 +96,20 @@ function checkCodeGraphFreshness() {
  * Run the CodeGraph mission context pack via the existing CLI tool.
  * Returns { success: boolean, packet?: object, error?: string }
  */
-function loadCodeGraphContext(missionId) {
+function loadCodeGraphContext(missionId, canonicalRepo, runner = execFileSync) {
+  const root = resolveCodeGraphRoot(canonicalRepo);
+  if (!root.available) return { success: false, ...root };
   try {
     const args = [
       join(CODEGRAPH_TOOLS_DIR, "mission-context-pack.js"),
       "--repo",
-      "openclaw",
+      canonicalRepo,
       "--mission",
       missionId || "unknown",
       "--json",
       "--compact",
     ];
-    const result = execFileSync("node", args, {
+    const result = runner("node", args, {
       encoding: "utf8",
       timeout: 15000,
       stdio: ["ignore", "pipe", "pipe"],
@@ -114,11 +129,13 @@ function loadCodeGraphContext(missionId) {
  * Refresh the CodeGraph pack via the existing CLI tool.
  * Returns { success: boolean, error?: string }
  */
-function refreshCodeGraphPack() {
+function refreshCodeGraphPack(canonicalRepo, runner = execFileSync) {
+  const root = resolveCodeGraphRoot(canonicalRepo);
+  if (!root.available) return { success: false, ...root };
   try {
-    const result = execFileSync(
+    const result = runner(
       "node",
-      [join(CODEGRAPH_TOOLS_DIR, "refresh-pack.js"), "--repo", "openclaw"],
+      [join(CODEGRAPH_TOOLS_DIR, "refresh-pack.js"), "--repo", canonicalRepo],
       { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "pipe"] }
     );
     return { success: true, output: result };
@@ -128,48 +145,58 @@ function refreshCodeGraphPack() {
 }
 
 /**
- * lah_context_resolve — mandatory CodeGraph bootstrap for mission startup.
+ * lah_context_resolve — one targeted CodeGraph discovery attempt.
  *
  * Checks CodeGraph freshness, refreshes if stale, and loads the mission
  * context packet. Returns a structured receipt.
  *
  * @param {object} options
  * @param {string} [options.missionId] - Mission ID for context packet
+ * @param {string} [options.canonical_repo] - Certified repository root
  * @returns {{ phase: string, can_proceed: boolean, receipt?: object, error?: string }}
  */
 function lah_context_resolve(options = {}) {
-  const { missionId } = options;
+  const { missionId, canonical_repo: canonicalRepo, runner = execFileSync } = options;
 
   // Step 1: Check freshness
-  const freshness = checkCodeGraphFreshness();
+  const freshness = checkCodeGraphFreshness(canonicalRepo, runner);
+
+  if (!freshness.fresh && freshness.error && freshness.code !== 1) {
+    return {
+      phase: "CODEGRAPH_UNAVAILABLE",
+      can_proceed: false,
+      error: freshness.error === "CODEGRAPH_CANONICAL_REPO_UNAVAILABLE" ? freshness.error : "CODEGRAPH_UNAVAILABLE",
+      freshness: { fresh: false, reason: "availability_failed" },
+    };
+  }
 
   if (!freshness.fresh) {
     // Step 2: Refresh if stale/missing
-    const refresh = refreshCodeGraphPack();
+    const refresh = refreshCodeGraphPack(canonicalRepo, runner);
     if (!refresh.success) {
       return {
-        phase: "CODEGRAPH_BOOTSTRAP",
+        phase: "CODEGRAPH_UNAVAILABLE",
         can_proceed: false,
-        error: `CodeGraph refresh failed: ${refresh.error}`,
+        error: refresh.error === "CODEGRAPH_CANONICAL_REPO_UNAVAILABLE" ? refresh.error : `CodeGraph refresh failed: ${refresh.error}`,
         freshness: { fresh: false, reason: "refresh_failed" },
       };
     }
   }
 
   // Step 3: Load mission context packet
-  const context = loadCodeGraphContext(missionId);
+  const context = loadCodeGraphContext(missionId, canonicalRepo, runner);
 
   if (!context.success) {
     return {
-      phase: "CODEGRAPH_BOOTSTRAP",
+      phase: "CODEGRAPH_UNAVAILABLE",
       can_proceed: false,
-      error: `CodeGraph context load failed: ${context.error}`,
+      error: context.error === "CODEGRAPH_CANONICAL_REPO_UNAVAILABLE" ? context.error : `CodeGraph context load failed: ${context.error}`,
       freshness: { fresh: freshness.fresh, reason: "context_load_failed" },
     };
   }
 
   return {
-    phase: "CODEGRAPH_BOOTSTRAP",
+    phase: "CODEGRAPH_TARGETED",
     can_proceed: true,
     receipt: {
       fresh: freshness.fresh,
@@ -190,6 +217,7 @@ class CertifiedStartupOrchestrator {
     this.startupPhase = "NOT_STARTED";
     this.startupActions = [];
     this.codegraphBootstrapReceipt = null;
+    this.codegraphResolver = options.codegraphResolver || lah_context_resolve;
     this.certifiedExecutionPathPacket = null;
     this.metrics = {
       startup_tool_calls: 0,
@@ -199,6 +227,8 @@ class CertifiedStartupOrchestrator {
       fingerprint_check_ms: 0,
       resume_packet_load_ms: 0,
       codegraph_bootstrap_ms: 0,
+      codegraph_calls: 0,
+      mandatory_codegraph_bootstrap: false,
       targeted_drift_discovery_calls: 0,
       startup_orientation_actions: 0,
       startup_orientation_blocked: 0,
@@ -278,34 +308,32 @@ class CertifiedStartupOrchestrator {
     });
     actions.push("BUILD_CERTIFIED_EXECUTION_PATH_PACKET");
 
-    // ── Step 4: Mandatory CodeGraph Bootstrap ──
-    this.startupPhase = "CODEGRAPH_BOOTSTRAP";
-    const cgStartTime = Date.now();
-    const codegraphResult = lah_context_resolve({
-      missionId,
-    });
-    this.metrics.codegraph_bootstrap_ms = Date.now() - cgStartTime;
-    this.metrics.startup_tool_calls++;
-
-    if (!codegraphResult.can_proceed) {
-      // CodeGraph bootstrap failed — block mission start
-      return {
-        phase: "CODEGRAPH_BOOTSTRAP_FAILED",
-        actions,
-        result: {
-          error: codegraphResult.error,
-          can_proceed: false,
-          codegraph_bootstrap_failed: true,
-          freshness: codegraphResult.freshness,
-        },
-      };
-    }
-
-    this.codegraphBootstrapReceipt = codegraphResult.receipt;
-    actions.push("CODEGRAPH_BOOTSTRAP");
-
-    // ── Step 5: Identify next_action ──
+    // ── Step 4: Identify next_action ──
     this.startupPhase = "IDENTIFY_NEXT_ACTION";
+    const nextActionDecision = this.certifiedExecutionPathPacket.nextActionDecision();
+    if (nextActionDecision.classification === "TARGETED_DISCOVERY_REQUIRED") {
+      const cgStartTime = Date.now();
+      const codegraphResult = this.codegraphResolver({
+        missionId,
+        canonical_repo: this.certifiedExecutionPathPacket.canonical_repo,
+      });
+      this.metrics.codegraph_bootstrap_ms = Date.now() - cgStartTime;
+      this.metrics.codegraph_calls++;
+      if (!codegraphResult.can_proceed) {
+        return {
+          phase: "CODEGRAPH_UNAVAILABLE",
+          actions,
+          result: {
+            error: codegraphResult.error,
+            can_proceed: true,
+            discovery_fallback: "DIRECT_READ_THEN_BOUNDED_FILESYSTEM",
+            codegraph_calls: this.metrics.codegraph_calls,
+          },
+        };
+      }
+      this.codegraphBootstrapReceipt = codegraphResult.receipt;
+      actions.push("TARGETED_CODEGRAPH");
+    }
 
     // If resume packet exists and fingerprint is unchanged, resume directly
     if (resumeResult.success && fingerprintResult.unchanged && !forceOrientation) {
@@ -358,7 +386,7 @@ class CertifiedStartupOrchestrator {
           checkpoint: packet.current_checkpoint,
           next_action: nextAction,
           certified_execution_path_packet: this.certifiedExecutionPathPacket,
-          next_action_decision: this.certifiedExecutionPathPacket.nextActionDecision(),
+          next_action_decision: nextActionDecision,
           approval_id: this.resumePacket.getApprovalId(),
           known_facts: packet.known_facts,
           can_proceed: true,
@@ -496,4 +524,8 @@ module.exports = {
   CertifiedArchitectureContext,
   MissionResumePacket,
   lah_context_resolve,
+  checkCodeGraphFreshness,
+  refreshCodeGraphPack,
+  loadCodeGraphContext,
+  resolveCodeGraphRoot,
 };

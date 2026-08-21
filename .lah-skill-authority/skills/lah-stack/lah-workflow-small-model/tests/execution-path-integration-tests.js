@@ -10,10 +10,10 @@ const {
 } = require("../scripts/certified-execution-path-packet");
 const { ConvergenceGovernor } = require("../scripts/convergence-governor");
 
-test("startup builds packet before CodeGraph and NEXT_ACTION", () => {
+test("startup builds packet before NEXT_ACTION and uses CodeGraph only after decision", () => {
   const source = fs.readFileSync(path.join(__dirname, "../scripts/startup-orchestrator.js"), "utf8");
-  assert.ok(source.indexOf('"BUILD_CERTIFIED_EXECUTION_PATH_PACKET"') < source.indexOf('lah_context_resolve({'));
-  assert.ok(source.indexOf('lah_context_resolve({') < source.indexOf('this.startupPhase = "IDENTIFY_NEXT_ACTION"'));
+  assert.ok(source.indexOf('"BUILD_CERTIFIED_EXECUTION_PATH_PACKET"') < source.indexOf('this.startupPhase = "IDENTIFY_NEXT_ACTION"'));
+  assert.ok(source.indexOf('this.startupPhase = "IDENTIFY_NEXT_ACTION"') < source.indexOf("this.codegraphResolver({"));
 });
 
 test("convergence governor consumes packet at dispatch boundary", () => {

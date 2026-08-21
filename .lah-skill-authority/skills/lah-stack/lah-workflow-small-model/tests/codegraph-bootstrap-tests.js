@@ -94,20 +94,17 @@ class TestRunner {
 async function main() {
   const runner = new TestRunner();
 
-  // T01: CodeGraph bootstrap is mandatory — mission cannot start without it
-  await runner.run("T01", "CodeGraph bootstrap is mandatory — mission cannot start without it", async () => {
-    // The startup orchestrator should have CODEGRAPH_BOOTSTRAP step
+  // T01: CodeGraph remains available as targeted discovery, not startup bootstrap
+  await runner.run("T01", "CodeGraph remains available as targeted discovery", async () => {
     const orch = new CertifiedStartupOrchestrator();
     assert.ok(orch.startupPhase === "NOT_STARTED", "Orchestrator should start in NOT_STARTED");
 
-    // The startup sequence should include CODEGRAPH_BOOTSTRAP
-    // We verify this by checking the startup method exists and has the right structure
     assert.strictEqual(typeof orch.startup, "function", "startup method should exist");
 
     // The lah_context_resolve function should exist
     assert.strictEqual(typeof lah_context_resolve, "function", "lah_context_resolve should exist");
 
-    return { pass: true, detail: "CodeGraph bootstrap is wired into startup orchestrator" };
+    return { pass: true, detail: "CodeGraph resolver remains wired for JIT discovery" };
   });
 
   // T02: lah_context_resolve returns a structured receipt
@@ -115,7 +112,7 @@ async function main() {
     // lah_context_resolve should return an object with phase, can_proceed, and optionally receipt
     const result = lah_context_resolve({ missionId: "test-mission" });
 
-    assert.ok(result.phase === "CODEGRAPH_BOOTSTRAP", `Expected phase CODEGRAPH_BOOTSTRAP, got ${result.phase}`);
+    assert.ok(["CODEGRAPH_TARGETED", "CODEGRAPH_UNAVAILABLE"].includes(result.phase), `Unexpected phase ${result.phase}`);
     assert.ok(typeof result.can_proceed === "boolean", "can_proceed should be boolean");
     assert.ok(result.receipt === undefined || typeof result.receipt === "object", "receipt should be object or undefined");
 
@@ -154,7 +151,7 @@ async function main() {
     // If CodeGraph tools exist, verify lah_context_resolve can find them
     const result = lah_context_resolve({ missionId: "test-fresh" });
     // Result may be fresh or not fresh depending on actual state, but should not throw
-    assert.ok(result.phase === "CODEGRAPH_BOOTSTRAP", "Should return CODEGRAPH_BOOTSTRAP phase");
+    assert.ok(["CODEGRAPH_TARGETED", "CODEGRAPH_UNAVAILABLE"].includes(result.phase), "Should return structured CodeGraph phase");
 
     return { pass: true, detail: `lah_context_resolve handled CodeGraph tools correctly (fresh=${result.receipt?.fresh || 'N/A'})` };
   });
@@ -167,7 +164,7 @@ async function main() {
 
     // The result should either succeed (after refresh) or fail gracefully
     // The key assertion is that it doesn't crash
-    assert.ok(result.phase === "CODEGRAPH_BOOTSTRAP", "Should return CODEGRAPH_BOOTSTRAP phase");
+    assert.ok(["CODEGRAPH_TARGETED", "CODEGRAPH_UNAVAILABLE"].includes(result.phase), "Should return structured CodeGraph phase");
 
     return { pass: true, detail: `Stale artifact handling works — can_proceed=${result.can_proceed}` };
   });
@@ -187,21 +184,18 @@ async function main() {
     return { pass: true, detail: `Missing CodeGraph dir handled gracefully — error=${result.error?.substring(0, 80) || 'none'}` };
   });
 
-  // T06: Convergence governor blocks discovery before CodeGraph bootstrap
-  await runner.run("T06", "Convergence governor blocks discovery before CodeGraph bootstrap", async () => {
+  // T06: Convergence governor does not impose mandatory startup CodeGraph
+  await runner.run("T06", "Convergence governor permits bounded discovery without startup bootstrap", async () => {
     const gov = new ConvergenceGovernor({ missionMode: "EXECUTE" });
 
-    // Before CodeGraph bootstrap, discovery should be blocked
     const result = gov.recordAction({
       command: "grep -r something .",
       mode: "EXECUTE",
     });
 
-    assert.strictEqual(result.allowed, false, "Discovery should be blocked before CodeGraph bootstrap");
-    assert.ok(result.reason.includes("CODEGRAPH_BOOTSTRAP_REQUIRED"), `Reason should mention CODEGRAPH_BOOTSTRAP_REQUIRED, got: ${result.reason}`);
-    assert.strictEqual(result.stop_reason, "CODEGRAPH_BOOTSTRAP_REQUIRED", "Stop reason should be CODEGRAPH_BOOTSTRAP_REQUIRED");
+    assert.strictEqual(result.allowed, true, "Bounded discovery should not require startup CodeGraph");
 
-    return { pass: true, detail: `Discovery blocked before bootstrap — reason: ${result.reason.substring(0, 80)}` };
+    return { pass: true, detail: "Discovery remains governed by packet and convergence policy" };
   });
 
   // T07: Convergence governor allows discovery after CodeGraph bootstrap
@@ -222,8 +216,8 @@ async function main() {
     return { pass: true, detail: "Discovery allowed after CodeGraph bootstrap is complete" };
   });
 
-  // T08: Startup orchestrator sequence includes CODEGRAPH_BOOTSTRAP
-  await runner.run("T08", "Startup orchestrator sequence includes CODEGRAPH_BOOTSTRAP", async () => {
+  // T08: Startup orchestrator exposes JIT CodeGraph metrics
+  await runner.run("T08", "Startup orchestrator exposes JIT CodeGraph metrics", async () => {
     const orch = new CertifiedStartupOrchestrator();
 
     // Verify the startup method has CODEGRAPH_BOOTSTRAP in its sequence
@@ -232,12 +226,13 @@ async function main() {
 
     // Verify metrics include codegraph_bootstrap_ms
     assert.ok("codegraph_bootstrap_ms" in orch.metrics, "Metrics should include codegraph_bootstrap_ms");
+    assert.strictEqual(orch.metrics.mandatory_codegraph_bootstrap, false);
 
-    return { pass: true, detail: "Startup orchestrator includes CODEGRAPH_BOOTSTRAP step in sequence" };
+    return { pass: true, detail: "Startup orchestrator marks mandatory bootstrap false" };
   });
 
-  // T09: Startup orchestrator blocks mission start when CodeGraph bootstrap fails
-  await runner.run("T09", "Startup orchestrator blocks mission start when CodeGraph bootstrap fails", async () => {
+  // T09: Startup orchestrator keeps read-only mission alive when JIT CodeGraph fails
+  await runner.run("T09", "Startup orchestrator keeps read-only mission alive when JIT CodeGraph fails", async () => {
     const orch = new CertifiedStartupOrchestrator();
 
     // Call startup with a mission that will fail CodeGraph bootstrap
@@ -247,17 +242,14 @@ async function main() {
       forceOrientation: true,
     });
 
-    // The result should either succeed (if CodeGraph tools are available) or fail gracefully
-    // The key assertion is that CODEGRAPH_BOOTSTRAP_FAILED is a possible phase
-    // We verify the orchestrator has the right structure to handle bootstrap failures
     assert.ok(
-      result.phase === "CODEGRAPH_BOOTSTRAP_FAILED" || result.phase === "RESUME_DIRECT" || result.phase === "ORIENTATION_PHASE" || result.phase === "CONTEXT_DRIFT_DETECTED",
+      result.phase === "CODEGRAPH_UNAVAILABLE" || result.phase === "RESUME_DIRECT" || result.phase === "ORIENTATION_PHASE" || result.phase === "CONTEXT_DRIFT_DETECTED",
       `Unexpected phase: ${result.phase}`
     );
 
-    if (result.phase === "CODEGRAPH_BOOTSTRAP_FAILED") {
-      assert.strictEqual(result.result.can_proceed, false, "Should not proceed when bootstrap fails");
-      assert.strictEqual(result.result.codegraph_bootstrap_failed, true, "Should flag bootstrap failure");
+    if (result.phase === "CODEGRAPH_UNAVAILABLE") {
+      assert.strictEqual(result.result.can_proceed, true, "Read-only mission remains available after one CodeGraph miss");
+      assert.strictEqual(result.result.codegraph_calls, 1, "Only one targeted CodeGraph attempt");
     }
 
     return { pass: true, detail: `Bootstrap failure handling works — phase=${result.phase}, can_proceed=${result.result?.can_proceed}` };

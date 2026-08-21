@@ -121,3 +121,25 @@ def test_invalid_relevant_authority_blocks_mutation_without_label_bypass():
     payload = json.loads(decision.result)
     assert payload["error"] == "governed_authority_degraded"
     assert payload["governance"]["downstream_execution_allowed"] is False
+
+
+def test_certified_routing_allows_read_only_codegraph_without_manual_router():
+    state = GovernedSkillState(
+        governed=True,
+        certified_routing_established=True,
+        canonical_repo="/home/deploy/hermes-agent",
+    )
+
+    assert state.before_tool("codegraph_query", {"query": "known"}).allowed
+    assert state.before_tool("codegraph_explore", {"query": "relationship"}).allowed
+
+
+def test_certified_routing_does_not_bypass_dangerous_actions():
+    state = GovernedSkillState(
+        governed=True,
+        certified_routing_established=True,
+        canonical_repo="/home/deploy/hermes-agent",
+    )
+
+    assert state.before_tool("provider_update", {}).allowed is False
+    assert state.before_tool("campaign_play", {}).allowed is False

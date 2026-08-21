@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import threading
@@ -125,6 +126,8 @@ class GovernedSkillState:
     authority_errors: tuple[str, ...] = ()
     phase: GovernancePhase = GovernancePhase.UNCLASSIFIED
     failure_reason: str = ""
+    certified_routing_established: bool = False
+    canonical_repo: str | None = None
     observed: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -162,6 +165,14 @@ class GovernedSkillState:
             if not self.governed:
                 return GovernanceDecision(True)
             capability = classify_tool_capability(tool_name, args)
+            if (
+                capability is ToolCapability.READ_ONLY
+                and tool_name in {"codegraph_query", "codegraph_explore"}
+                and self.certified_routing_established
+                and isinstance(self.canonical_repo, str)
+                and os.path.isabs(self.canonical_repo)
+            ):
+                return GovernanceDecision(True)
             if self.mode is GovernanceMode.DEGRADED_READ_ONLY:
                 if capability in {ToolCapability.READ_ONLY, ToolCapability.LOCAL_ENGINEERING_WRITE}:
                     return GovernanceDecision(True)

@@ -1500,25 +1500,6 @@ class ConvergenceGovernor {
       if (packetDecision.error === "UNNECESSARY_SOURCE_ARCHAEOLOGY_BLOCKED") return packetDecision;
     }
 
-    // ── CodeGraph Bootstrap Gate ──
-    // Block discovery actions until CodeGraph bootstrap is complete.
-    // This is the mandatory enforcement boundary: raw repository/runtime
-    // discovery cannot proceed before CodeGraph has resolved the repo.
-    if (!this.codegraphBootstrapCompleted) {
-      this.codegraphBootstrapBlockedCount++;
-      this.metrics.increment("codegraph_bootstrap_blocked_count");
-      return {
-        allowed: false,
-        reason: "CODEGRAPH_BOOTSTRAP_REQUIRED: CodeGraph mandatory bootstrap has not been completed. Mission startup must run lah_context_resolve() before any discovery action.",
-        stop_reason: STOP_REASON.CODEGRAPH_BOOTSTRAP_REQUIRED,
-        convergence_check: this.forceConvergence.generateConvergenceCheck({
-          knownFacts: this._getKnownFacts(),
-          blockingUnknown: this._getBlockingUnknown(),
-          requiredNextAction: "Complete CodeGraph bootstrap before discovery",
-        }),
-      };
-    }
-
     this.metrics.increment("total_tool_calls");
 
     // P8: Mutation escalation guard check
