@@ -12,6 +12,15 @@ class _Agent:
 def test_dispatch_boundary_accepts_only_canonical_router_name():
     agent = _Agent()
     assert _governance_preflight(
+        agent, "skill_view", {"name": "lah-workflow-small-model"}
+    ) is None
+    _governance_observe(
+        agent,
+        "skill_view",
+        {"name": "lah-workflow-small-model"},
+        json.dumps({"success": True, "skill_name": "lah-workflow-small-model"}),
+    )
+    assert _governance_preflight(
         agent, "skill_view", {"name": "lah-stack/lah-repo-router"}
     )
     assert _governance_preflight(agent, "skill_view", {"name": "lah-repo-router"}) is None
@@ -25,10 +34,17 @@ def test_dispatch_boundary_denies_terminal_until_both_gates_pass():
     _governance_observe(
         agent,
         "skill_view",
+        {"name": "lah-workflow-small-model"},
+        json.dumps({"success": True, "skill_name": "lah-workflow-small-model"}),
+    )
+    _governance_observe(
+        agent,
+        "skill_view",
         {"name": "lah-repo-router"},
         json.dumps({"success": True, "skill_name": "lah-repo-router"}),
     )
-    assert _governance_preflight(agent, "terminal", {"command": "true"})
+    blocked_after_router = _governance_preflight(agent, "terminal", {"command": "true"})
+    assert json.loads(blocked_after_router)["governance"]["downstream_execution_allowed"] is False
 
     _governance_observe(
         agent,
