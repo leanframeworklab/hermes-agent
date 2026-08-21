@@ -53,4 +53,5 @@ def test_dispatch_boundary_denies_terminal_until_both_gates_pass():
         json.dumps({"success": True, "skill_name": "mission-decomposer"}),
     )
     terminal_block = json.loads(_governance_preflight(agent, "terminal", {"command": "true"}))
-    assert terminal_block["reason_code"] == "UNKNOWN"
+    assert terminal_block["reason_code"] == "WORKFLOW_CONVERGENCE_STOP"
+    assert terminal_block["scope"] == "ACTION"

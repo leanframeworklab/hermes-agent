@@ -20,7 +20,7 @@ def test_drift_keeps_diagnostics_and_codegraph_available():
     assert _governance_preflight(agent, "skills_list", {}) is None
     assert _governance_preflight(agent, "search_files", {"query": "ROUTER_REQUIRED", "exact": True}) is None
     codegraph_block = json.loads(_governance_preflight(agent, "codegraph_query", {"query": "tool dispatch"}))
-    assert codegraph_block["reason_code"] == "BLOCK_PATH_ESCAPE"
+    assert codegraph_block["reason_code"] == "GOVERNED_AUTHORITY_DEGRADED"
 
 
 def test_drift_blocks_external_mutation_with_authority_receipt():
@@ -39,6 +39,8 @@ def test_drift_blocks_external_mutation_with_authority_receipt():
 
 def test_drift_allows_conservative_read_only_terminal_command():
     agent = _Agent()
-    assert _governance_preflight(agent, "terminal", {"command": "git diff -- agent"}) is None
-    assert _governance_preflight(agent, "terminal", {"command": "git status --short"}) is None
+    payload = json.loads(_governance_preflight(agent, "terminal", {"command": "git diff -- agent"}))
+    assert payload["scope"] == "MISSION"
+    status_payload = json.loads(_governance_preflight(agent, "terminal", {"command": "git status --short"}))
+    assert status_payload["scope"] == "MISSION"
     assert _governance_preflight(agent, "terminal", {"command": "git add agent"}) is not None

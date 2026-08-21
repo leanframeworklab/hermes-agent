@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -45,6 +46,11 @@ class ToolCapability(str, Enum):
     DEPLOYMENT = "DEPLOYMENT"
     DESTRUCTIVE = "DESTRUCTIVE"
     UNKNOWN = "UNKNOWN"
+
+
+class DenialScope(str, Enum):
+    ACTION = "ACTION"
+    MISSION = "MISSION"
 
 
 ORCHESTRATOR = "lah-workflow-small-model"
@@ -135,7 +141,7 @@ class GovernedSkillState:
     bootstrap_packet: Mapping[str, Any] | None = None
     native_workflow: bool = False
     _denial_fingerprints: dict[str, int] = field(default_factory=dict, repr=False)
-    _terminal_hard_block_reason: str | None = field(default=None, repr=False)
+    _denial_family_counts: dict[str, int] = field(default_factory=dict, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -144,6 +150,10 @@ class GovernedSkillState:
         if not self.authority_valid:
             self.phase = GovernancePhase.MANDATORY_SKILL_RESOLUTION_FAILED
             self.failure_reason = "; ".join(self.authority_errors) or "runtime skill authority invalid"
+        elif self.native_workflow and self.bootstrap_packet:
+            # Ling3 packet is already the canonical workflow bootstrap. Do not
+            # force legacy orchestrator/router/decomposer gates afterward.
+            self.phase = GovernancePhase.GOVERNANCE_PREREQUISITES_PASSED
         else:
             self.phase = GovernancePhase.ORCHESTRATOR_REQUIRED
 
@@ -172,20 +182,16 @@ class GovernedSkillState:
             if not self.governed:
                 return GovernanceDecision(True)
             args = dict(args or {})
-            if self._terminal_hard_block_reason and tool_name in {
-                "read_file", "search_files", "terminal", "execute_code",
-                "codegraph_query", "codegraph_explore",
+            capability = classify_tool_capability(tool_name, args)
+            if not self.authority_valid and tool_name in {
+                "terminal", "execute_code", "codegraph_query", "codegraph_explore",
+                "provider_update", "campaign_play", "deploy", "restart_service",
             }:
                 return GovernanceDecision(
                     False,
-                    self._hard_receipt(
-                        "WORKFLOW_CONVERGENCE_STOP",
-                        f"terminal hard safety denial: {self._terminal_hard_block_reason}",
-                        tool_name,
-                        args,
-                    ),
+                    self._hard_receipt("GOVERNED_AUTHORITY_DEGRADED", self.failure_reason, tool_name, args,
+                                       scope=DenialScope.MISSION, capability=capability),
                 )
-            capability = classify_tool_capability(tool_name, args)
             try:
                 spec = classify_operation(tool_name, args)
             except UnknownCapabilityError:
@@ -211,17 +217,21 @@ class GovernedSkillState:
                 policy = evaluate_read_only(tool_name, policy_args)
                 if policy.decision in {ReadOnlyDecision.ALLOW, ReadOnlyDecision.ALLOW_WITH_REDACTION}:
                     return GovernanceDecision(True)
-                if tool_name in {"read_file", "search_files"}:
-                    self._terminal_hard_block_reason = policy.decision.value
-                return GovernanceDecision(False, self._hard_receipt(policy.decision.value, policy.reason, tool_name, args))
+                return GovernanceDecision(False, self._action_denial(
+                    policy.decision.value, policy.reason, tool_name, args, capability
+                ))
 
             if spec is None and capability is ToolCapability.READ_ONLY:
-                return GovernanceDecision(False, self._hard_receipt("BLOCK_UNKNOWN_TOOL", self.failure_reason, tool_name, args))
+                return GovernanceDecision(False, self._action_denial(
+                    "BLOCK_UNKNOWN_TOOL", self.failure_reason, tool_name, args, capability
+                ))
 
             if capability in {ToolCapability.EXTERNAL_MUTATION, ToolCapability.FINANCIAL,
                               ToolCapability.PLAY, ToolCapability.DEPLOYMENT, ToolCapability.DESTRUCTIVE,
                               ToolCapability.UNKNOWN}:
-                return GovernanceDecision(False, self._hard_receipt(capability.value, self.failure_reason, tool_name, args))
+                return GovernanceDecision(False, self._action_denial(
+                    capability.value, self.failure_reason, tool_name, args, capability
+                ))
 
             if self.native_workflow and self.bootstrap_packet:
                 allowed = self.bootstrap_packet.get("allowed_tools", [])
@@ -266,20 +276,78 @@ class GovernedSkillState:
             "reason": self.failure_reason or "relevant governed skill authority invalid",
         }}, ensure_ascii=False)
 
+    def _capability_family(self, tool_name: str | None, args: Mapping[str, Any] | None,
+                           capability: ToolCapability, reason: str) -> str:
+        command = str((args or {}).get("command") or "")
+        code = str((args or {}).get("code") or "")
+        if tool_name == "execute_code" and re.search(r"\b(open|pathlib|os|shutil|read|write|file)\b", code, re.I):
+            return "FILE_BYPASS"
+        if tool_name == "terminal" and re.search(r"\b(cat|head|tail|sed|rg|grep|find|stat|file)\b", command):
+            return "FILE_BYPASS"
+        if capability is ToolCapability.READ_ONLY:
+            return "READ_ONLY"
+        if capability is ToolCapability.UNKNOWN or tool_name == "execute_code":
+            return "GENERAL_EXECUTION"
+        return capability.value
+
+    def _action_denial(self, reason: str, reason_detail: str, tool_name: str,
+                       args: Mapping[str, Any], capability: ToolCapability) -> str:
+        family = self._capability_family(tool_name, args, capability, reason)
+        normalized = json.dumps({"tool": tool_name, "operation": reason,
+                                 "arguments": dict(args)}, sort_keys=True, default=str)
+        arguments_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        authority = hashlib.sha256(json.dumps({"valid": self.authority_valid,
+                                               "errors": self.authority_errors}, sort_keys=True).encode("utf-8")).hexdigest()
+        fingerprint = f"{family}:{tool_name}:{reason}:{arguments_hash}"
+        self._denial_fingerprints[fingerprint] = self._denial_fingerprints.get(fingerprint, 0) + 1
+        family_count = self._denial_family_counts.get(family, 0) + 1
+        self._denial_family_counts[family] = family_count
+        reason_code = "WORKFLOW_CONVERGENCE_STOP" if family_count >= 2 else reason
+        payload = json.loads(self._hard_receipt(
+            reason_code, reason_detail, tool_name, args, scope=DenialScope.ACTION,
+            capability=capability, repeat_count=family_count,
+        ))
+        payload["denial_fingerprint"] = {
+            "scope": DenialScope.ACTION.value,
+            "reason_code": reason,
+            "tool": tool_name,
+            "operation": reason,
+            "normalized_arguments_hash": arguments_hash,
+            "capability_family": family,
+            "state": self.phase.value,
+            "authority_fingerprint": authority,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     def _hard_receipt(self, reason: str, reason_detail: str = "", tool_name: str | None = None,
-                      args: Mapping[str, Any] | None = None) -> str:
+                      args: Mapping[str, Any] | None = None, *,
+                      scope: DenialScope | None = None,
+                      capability: ToolCapability | None = None,
+                      repeat_count: int | None = None) -> str:
+        scope = scope or (DenialScope.MISSION if not self.authority_valid else DenialScope.ACTION)
+        capability = capability or classify_tool_capability(tool_name or "", args or {})
+        mission_valid = scope is DenialScope.ACTION
+        allowed_next = ["read_file", "skill_view", "pure_calculation"] if mission_valid else []
         payload = {
             "status": "BLOCKED",
             "reason_code": reason,
             "hard_block": True,
+            "scope": scope.value,
             "state": self.phase.value,
             "detail": reason_detail,
             "tool": tool_name,
             "retry_other_tools": False,
             "next_action": None,
+            "actual_reason": reason_detail or reason,
+            "blocked_capability": capability.value,
+            "blocked_capability_family": self._capability_family(tool_name, args, capability, reason),
+            "mission_still_valid": mission_valid,
+            "allowed_next_actions": allowed_next,
             "error": "governed_authority_degraded" if not self.authority_valid else "governed_mission_blocked",
             "governance": {"downstream_execution_allowed": False, "reason": reason_detail or reason},
         }
+        if repeat_count is not None:
+            payload["repeat_count"] = repeat_count
         return json.dumps(payload, ensure_ascii=False)
 
     def _workflow_receipt(self, tool_name: str, args: Mapping[str, Any]) -> str:

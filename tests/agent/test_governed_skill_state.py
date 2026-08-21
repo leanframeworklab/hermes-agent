@@ -102,8 +102,8 @@ def test_invalid_authority_enters_read_only_degraded_mode():
 
     assert state.mode is GovernanceMode.DEGRADED_READ_ONLY
     assert state.before_tool("read_file", {"path": "agent/governed_skill_state.py"}).allowed
-    assert json.loads(state.before_tool("codegraph_query", {"query": "GovernanceMode"}).result)["reason_code"] == "BLOCK_PATH_ESCAPE"
-    assert state.before_tool("terminal", {"command": "git status --short"}).allowed
+    assert json.loads(state.before_tool("codegraph_query", {"query": "GovernanceMode"}).result)["reason_code"] == "GOVERNED_AUTHORITY_DEGRADED"
+    assert state.before_tool("terminal", {"command": "git status --short"}).allowed is False
 
 
 def test_invalid_relevant_authority_blocks_mutation_without_label_bypass():

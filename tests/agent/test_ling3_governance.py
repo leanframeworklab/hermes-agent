@@ -192,7 +192,7 @@ def test_managed_skill_root_does_not_allow_secret_or_sibling_paths(tmp_path, mon
     assert outside["reason_code"] == "BLOCK_PATH_ESCAPE"
 
 
-def test_hard_path_denial_stops_alternate_terminal_probe(tmp_path):
+def test_hard_path_denial_does_not_poison_unrelated_terminal_evaluation(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
     state = GovernedSkillState(governed=True)
@@ -201,6 +201,89 @@ def test_hard_path_denial_stops_alternate_terminal_probe(tmp_path):
     second = json.loads(state.before_tool("terminal", {"command": "cat /tmp/outside.txt"}).result)
 
     assert first["reason_code"] == "BLOCK_PATH_ESCAPE"
-    assert second["reason_code"] == "WORKFLOW_CONVERGENCE_STOP"
+    assert second["reason_code"] == "BLOCK_UNKNOWN_TOOL"
+    assert second["scope"] == "ACTION"
     assert second["hard_block"] is True
     assert second["retry_other_tools"] is False
+
+
+def _calc_args(code="2 + 2"):
+    return {
+        "sandbox_profile": "pure_calculation_v1",
+        "code": code,
+        "limits": {
+            "cpu_operations": 100,
+            "memory_bytes": 131072,
+            "output_chars": 4096,
+            "wall_time_ms": 2000,
+        },
+    }
+
+
+def test_denied_terminal_does_not_poison_exact_read(tmp_path):
+    path = tmp_path / "evidence.txt"
+    path.write_text("evidence", encoding="utf-8")
+    state = GovernedSkillState(governed=True)
+
+    denied = json.loads(state.before_tool("terminal", {"command": "cat /tmp/evidence.txt"}).result)
+    allowed = state.before_tool("read_file", {"path": str(path), "allowed_roots": [str(tmp_path)]})
+
+    assert denied["scope"] == "ACTION"
+    assert denied["mission_still_valid"] is True
+    assert allowed.allowed is True
+
+
+def test_denied_execute_code_does_not_poison_pure_calculation():
+    state = GovernedSkillState(governed=True)
+
+    denied = json.loads(state.before_tool("execute_code", {"code": "2 + 2"}).result)
+    allowed = state.before_tool("pure_calculation", _calc_args())
+
+    assert denied["scope"] == "ACTION"
+    assert denied["blocked_capability_family"] == "GENERAL_EXECUTION"
+    assert allowed.allowed is True
+
+
+def test_terminal_equivalent_bypass_converges_only_within_family(tmp_path):
+    path = tmp_path / "evidence.txt"
+    path.write_text("evidence", encoding="utf-8")
+    state = GovernedSkillState(governed=True)
+
+    first = json.loads(state.before_tool("terminal", {"command": "cat /tmp/evidence.txt"}).result)
+    second = json.loads(state.before_tool("execute_code", {"code": "open('/tmp/evidence.txt').read()"}).result)
+    allowed = state.before_tool("read_file", {"path": str(path), "allowed_roots": [str(tmp_path)]})
+
+    assert first["scope"] == "ACTION"
+    assert second["reason_code"] == "WORKFLOW_CONVERGENCE_STOP"
+    assert second["scope"] == "ACTION"
+    assert second["blocked_capability_family"] == "FILE_BYPASS"
+    assert allowed.allowed is True
+
+
+def test_ling3_native_bootstrap_clears_legacy_orchestrator_state():
+    packet = compile_bootstrap_packet(
+        mission_id="ling3-1",
+        mission_text="READ_ONLY_ANALYTICAL use lah-workflow-ling3",
+        initial_action={"tool": "skill_view", "arguments": {"name": "lah-workflow-ling3"}},
+    )
+    state = GovernedSkillState(governed=True, bootstrap_packet=packet, native_workflow=True)
+
+    assert state.phase.name == "GOVERNANCE_PREREQUISITES_PASSED"
+    assert state.before_tool("skill_view", {"name": "lah-workflow-ling3"}).allowed is True
+    state.observe_skill_result("lah-workflow-ling3", {"success": True, "skill_name": "lah-workflow-ling3"})
+    assert state.phase.name == "GOVERNANCE_PREREQUISITES_PASSED"
+    assert state.before_tool("skill_view", {"name": "lah-repo-router"}).allowed is True
+    assert state.before_tool("read_file", {"path": __file__, "allowed_roots": [str(tmp_path := Path(__file__).parent)]}).allowed is True
+
+
+def test_true_authority_failure_is_mission_blocked():
+    state = GovernedSkillState(
+        governed=True,
+        authority_valid=False,
+        authority_errors=("runtime authority invalid",),
+    )
+
+    payload = json.loads(state.before_tool("terminal", {"command": "git status --short"}).result)
+
+    assert payload["scope"] == "MISSION"
+    assert payload["mission_still_valid"] is False
