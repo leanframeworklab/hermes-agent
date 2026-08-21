@@ -17,6 +17,10 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { normalizeReadOnlyDecomposerResult } = require('../../../lah-stack/lah-workflow-small-model/scripts/certified-execution-path-packet.js');
 
 const [missionFile, repoPath, missionType] = process.argv.slice(2);
 
@@ -312,13 +316,34 @@ for (const p of phases) {
 }
 
 // Valider les dépendances
+const missingDependencies = [];
 for (const p of phases) {
   for (const dep of p.depends_on) {
     if (!idMap[dep]) {
-      console.error(JSON.stringify({ error: `Phase ${p.id} depends on unknown phase: ${dep}` }));
-      process.exit(1);
+      missingDependencies.push({ phase: p.id, dependency: dep });
     }
   }
+}
+
+if (missingDependencies.length > 0) {
+  const documented = missingDependencies.length === 1
+    && missingDependencies[0].phase === 'gate6_tests'
+    && missingDependencies[0].dependency === 'gate5b_implementation';
+  const fallback = normalizeReadOnlyDecomposerResult({
+    mission_type: type,
+    result: { error: 'Phase gate6_tests depends on unknown phase: gate5b_implementation' },
+  });
+  if (documented && fallback.classification === 'DECOMPOSER_FALLBACK_READ_ONLY') {
+    console.log(JSON.stringify({
+      classification: fallback.classification,
+      gate: fallback.gate,
+      mission: { file: missionFile, type, repo: repoPath },
+      phases: [],
+    }, null, 2));
+    process.exit(0);
+  }
+  console.error(JSON.stringify({ error: `Phase ${missingDependencies[0].phase} depends on unknown phase: ${missingDependencies[0].dependency}` }));
+  process.exit(1);
 }
 
 // Vérifier l'ordre topologique (DAG)

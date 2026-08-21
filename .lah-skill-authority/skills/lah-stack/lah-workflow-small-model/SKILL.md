@@ -454,9 +454,10 @@ CodeGraph bootstrap is a mandatory gate in the startup sequence for all governed
 1. LOAD_CONTEXT — Load Certified Architecture Context
 2. VERIFY_FINGERPRINT — Compare `LAH_ARCHITECTURE_FINGERPRINT`
 3. LOAD_RESUME_PACKET — Load mission resume packet
-4. CODEGRAPH_BOOTSTRAP — Run `lah_context_resolve()` to check freshness, refresh if stale, load mission context packet
-5. IDENTIFY_NEXT_ACTION — Determine next action from checkpoint or resume packet
-6. EXECUTE — Execute the next action directly
+4. BUILD_CERTIFIED_EXECUTION_PATH_PACKET — Compile exact paths, symbols, relationships, forbidden rediscovery, and `NEXT_ACTION` from the two machine-owned packets
+5. CODEGRAPH_BOOTSTRAP — Run `lah_context_resolve()` as startup infrastructure; mission execution does not use model discovery when packet evidence is sufficient
+6. IDENTIFY_NEXT_ACTION — Determine next action from checkpoint or resume packet
+7. EXECUTE — Execute the next action directly
 
 **The `lah_context_resolve()` function** (in `scripts/startup-orchestrator.js`) is the semantic primitive for CodeGraph bootstrap. It:
 - Checks CodeGraph freshness via `freshness-check.js`
@@ -497,9 +498,10 @@ Every mission startup now follows this order:
 1. **LOAD_CONTEXT** — Load the Certified Architecture Context from `scripts/certified-architecture-context.js`
 2. **VERIFY_FINGERPRINT** — Compare `LAH_ARCHITECTURE_FINGERPRINT` with stored value
 3. **LOAD_RESUME_PACKET** — Load mission resume packet
-4. **CODEGRAPH_BOOTSTRAP** — Run `lah_context_resolve()` to check CodeGraph freshness, refresh if stale, load mission context packet
-5. **IDENTIFY_NEXT_ACTION** — Determine the next action from checkpoint or resume packet
-6. **EXECUTE** — Execute the next action directly
+4. **BUILD_CERTIFIED_EXECUTION_PATH_PACKET** — Compile `CERTIFIED_EXECUTION_PATH_PACKET` from context + resume state
+5. **CODEGRAPH_BOOTSTRAP** — Run `lah_context_resolve()` as infrastructure
+6. **IDENTIFY_NEXT_ACTION** — Determine the next action from checkpoint or resume packet
+7. **EXECUTE** — Execute the next action directly
 
 Only if:
 - Context is missing
@@ -544,6 +546,25 @@ Persistent mission resume packets capture the exact state needed to continue a m
 - last_verified_at
 
 A mission continuation MUST load this packet before any discovery.
+
+### Certified Execution Path Packet (targeted convergence repair)
+
+`scripts/certified-execution-path-packet.js` is a pure compilation layer over
+the certified context and resume packet. It owns no mission progression,
+approval, safety, financial, provider, or business state. It exposes:
+
+- `known_execution_paths` — logical boundary, canonical repo, file path, symbol, authority fact, freshness, direct-read permission
+- `known_relationships` — source, target, relation, authority
+- `forbidden_rediscovery` — fact/boundary, reason, authority
+- `blocking_unknowns` and `allowed_discovery`
+- machine-owned `current_checkpoint` and `next_action`
+
+Discovery escalation is deterministic: `CERTIFIED_PACKET`,
+`DIRECT_TARGETED_READ`, `CODEGRAPH_TARGETED_RELATIONSHIP_QUERY`, then
+`BOUNDED_FILESYSTEM_SEARCH`. Level 3 requires both `PACKET_MISS` and
+`CODEGRAPH_MISS`; otherwise return `UNNECESSARY_SOURCE_ARCHAEOLOGY_BLOCKED`.
+Known-path rediscovery is mechanically blocked or redirected at startup and
+Convergence Governor dispatch. The packet is model-provider independent.
 
 ### No-Rediscovery Gate (P5+P6)
 

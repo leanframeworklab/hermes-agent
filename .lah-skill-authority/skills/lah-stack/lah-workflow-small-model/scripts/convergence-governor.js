@@ -18,6 +18,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { enforceDiscoveryAction } = require("./certified-execution-path-packet");
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1451,6 +1452,11 @@ class ConvergenceGovernor {
       runtime_gate_fingerprint: null,
       set_at: null,
     };
+    this.certifiedExecutionPathPacket = options.certifiedExecutionPathPacket || null;
+  }
+
+  setCertifiedExecutionPathPacket(packet) {
+    this.certifiedExecutionPathPacket = packet || null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -1479,6 +1485,20 @@ class ConvergenceGovernor {
       discoveryFamily = null,
       sameResult = true,
     } = action;
+
+    // Packet is first machine-owned lookup. Known facts never fall through
+    // to broad discovery; freshness requests become direct reads.
+    if (this.certifiedExecutionPathPacket) {
+      const packetDecision = enforceDiscoveryAction({
+        type: action.type || "relationship",
+        target: command,
+        command,
+        mutation: isMutation,
+      }, this.certifiedExecutionPathPacket, action.packet_options || {});
+      if (packetDecision.error === "CERTIFIED_FACT_REDISCOVERY_BLOCKED") return packetDecision;
+      if (packetDecision.level === "DIRECT_TARGETED_READ") return packetDecision;
+      if (packetDecision.error === "UNNECESSARY_SOURCE_ARCHAEOLOGY_BLOCKED") return packetDecision;
+    }
 
     // ── CodeGraph Bootstrap Gate ──
     // Block discovery actions until CodeGraph bootstrap is complete.

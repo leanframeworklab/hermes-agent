@@ -31,6 +31,11 @@ const { execFileSync } = require("child_process");
 const { join } = require("path");
 const { CertifiedArchitectureContext } = require("./certified-architecture-context");
 const { MissionResumePacket } = require("./mission-resume-packet");
+const {
+  compileCertifiedExecutionPathPacket,
+  enforceDiscoveryAction,
+  normalizeReadOnlyDecomposerResult,
+} = require("./certified-execution-path-packet");
 
 // ─── CodeGraph Bootstrap ────────────────────────────────────
 // Paths are relative to the openclaw-runtime repo root,
@@ -185,6 +190,7 @@ class CertifiedStartupOrchestrator {
     this.startupPhase = "NOT_STARTED";
     this.startupActions = [];
     this.codegraphBootstrapReceipt = null;
+    this.certifiedExecutionPathPacket = null;
     this.metrics = {
       startup_tool_calls: 0,
       certified_fact_rediscovery_attempts: 0,
@@ -196,6 +202,7 @@ class CertifiedStartupOrchestrator {
       targeted_drift_discovery_calls: 0,
       startup_orientation_actions: 0,
       startup_orientation_blocked: 0,
+      packet_rediscovery_blocked: 0,
     };
   }
 
@@ -247,6 +254,29 @@ class CertifiedStartupOrchestrator {
     actions.push("LOAD_RESUME_PACKET");
     this.metrics.startup_tool_calls++;
     this.metrics.resume_packet_load_ms = resumeResult.load_ms || 0;
+
+    // Pure compilation from already-authoritative context + resume state.
+    // It is machine-owned execution input, not a second governance authority.
+    this.startupPhase = "BUILD_CERTIFIED_EXECUTION_PATH_PACKET";
+    const contextFacts = this.context.getAllFacts();
+    const resumePacket = resumeResult.success
+      ? resumeResult.packet
+      : {
+          mission_id: missionId || "unknown",
+          current_checkpoint: null,
+          next_action: null,
+          blocking_unknowns: [],
+          forbidden_rediscovery: [],
+        };
+    const canonicalRepo = contextFacts.REPO_OWNERSHIP?.value?.canonical_checkout || null;
+    const canonicalRuntimeRepo = contextFacts.OPENCLAW_RUNTIME?.value?.code_location || null;
+    this.certifiedExecutionPathPacket = compileCertifiedExecutionPathPacket({
+      context: { facts: contextFacts },
+      resume: resumePacket,
+      canonical_repo: canonicalRepo,
+      canonical_runtime_repo: canonicalRuntimeRepo,
+    });
+    actions.push("BUILD_CERTIFIED_EXECUTION_PATH_PACKET");
 
     // ── Step 4: Mandatory CodeGraph Bootstrap ──
     this.startupPhase = "CODEGRAPH_BOOTSTRAP";
@@ -327,6 +357,8 @@ class CertifiedStartupOrchestrator {
           fingerprint_unchanged: true,
           checkpoint: packet.current_checkpoint,
           next_action: nextAction,
+          certified_execution_path_packet: this.certifiedExecutionPathPacket,
+          next_action_decision: this.certifiedExecutionPathPacket.nextActionDecision(),
           approval_id: this.resumePacket.getApprovalId(),
           known_facts: packet.known_facts,
           can_proceed: true,
@@ -398,6 +430,15 @@ class CertifiedStartupOrchestrator {
    * @returns {{ allowed: boolean, reason: string, blocked: boolean }}
    */
   evaluateDiscovery(action, options = {}) {
+    if (this.certifiedExecutionPathPacket) {
+      const packetDecision = enforceDiscoveryAction(action, this.certifiedExecutionPathPacket, options);
+      if (packetDecision.error === "CERTIFIED_FACT_REDISCOVERY_BLOCKED") {
+        this.metrics.certified_fact_rediscovery_blocked++;
+        this.metrics.packet_rediscovery_blocked++;
+        return packetDecision;
+      }
+      if (packetDecision.level === "DIRECT_TARGETED_READ") return packetDecision;
+    }
     this.metrics.startup_tool_calls++;
 
     if (action.type === "rediscover") {
@@ -411,6 +452,10 @@ class CertifiedStartupOrchestrator {
     }
 
     return result;
+  }
+
+  normalizeDecomposerResult(result, missionType) {
+    return normalizeReadOnlyDecomposerResult({ mission_type: missionType, result });
   }
 
   /**
