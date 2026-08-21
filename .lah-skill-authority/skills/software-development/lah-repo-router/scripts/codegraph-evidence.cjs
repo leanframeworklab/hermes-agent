@@ -22,6 +22,10 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const {
+  classifyCodegraphIntent,
+  buildCodegraphInvocation,
+} = require('./codegraph-primitive-selection.cjs');
 
 // ========== Config ==========
 const CODEGRAPH_BINARY = '/home/deploy/.npm-global/bin/codegraph';
@@ -138,6 +142,8 @@ function checkIndexFreshness(repoId) {
 // ========== Query derivation (Phase 5) ==========
 
 function deriveQueries(mission, repoId, requestedRoles) {
+  const intent = classifyCodegraphIntent(mission);
+  if (intent.primitive !== 'explore') return [{ query: intent.target, intent }];
   const ml = mission.toLowerCase();
   const words = ml.split(/[\s_:—–-]+/).filter(w => w.length > 2);
   const uniqueWords = [...new Set(words)];
@@ -221,7 +227,9 @@ function deriveQueries(mission, repoId, requestedRoles) {
   }
 
   // Remove duplicates and empty
-  return [...new Set(queries.filter(q => q && q.length > 3))].slice(0, MAX_QUERIES_PER_REPO);
+  return [...new Set(queries.filter(q => q && q.length > 3))]
+    .slice(0, MAX_QUERIES_PER_REPO)
+    .map(query => ({ query, intent: classifyCodegraphIntent(query) }));
 }
 
 function getRepoContextQuery(repoId, mission) {
@@ -286,22 +294,24 @@ async function collectEvidence(repoId, mission, queries) {
   const isStale = freshness.status === 'STALE';
 
   // Run queries
-  for (const query of queries) {
-    const receipt = { query, result: null, error: null };
+  for (const request of queries) {
+    const query = request.query;
+    const intent = request.intent;
+    const receipt = { query, type: intent.primitive, result: null, error: null };
 
     try {
-      // Try explore first
-      const exploreResult = runCodegraph(
-        ['explore', JSON.stringify(query), '--max-files', String(MAX_FILES_PER_EXPLORE)],
-        rp
-      );
+      const invocation = intent.primitive === 'explore'
+        ? [...buildCodegraphInvocation(intent, query), '--max-files', String(MAX_FILES_PER_EXPLORE)]
+        : buildCodegraphInvocation(intent, query);
+      const operationResult = runCodegraph(invocation, rp);
 
-      if (exploreResult.exit_code === 0 && exploreResult.output) {
-        receipt.result = 'explore_ok';
-        receipt.duration_ms = exploreResult.duration_ms;
+      if (operationResult.exit_code === 0 && operationResult.output) {
+        receipt.result = `${intent.primitive}_ok`;
+        receipt.type = intent.primitive;
+        receipt.duration_ms = operationResult.duration_ms;
 
         // Parse explore output for evidence
-        const output = exploreResult.output;
+        const output = operationResult.output;
 
         // Extract file references
         const fileMatches = output.match(/([a-zA-Z0-9_\-./]+\.(?:mjs|js|py|ts|php|yaml|json)):\d+/g);
@@ -332,21 +342,23 @@ async function collectEvidence(repoId, mission, queries) {
         while ((symbolMatch = symbolPattern.exec(output)) !== null) {
           const sym = symbolMatch[1].replace(/\u001b\[\d+m/g, '');
           if (!matchedSymbols.find(s => s.name === sym) && sym.length > 2) {
-            matchedSymbols.push({ name: sym, context: query.substring(0, 60) });
+            matchedSymbols.push({ name: sym, context: String(query).substring(0, 60) });
           }
         }
 
         queryReceipts.push({
           query,
-          type: 'explore',
+          type: intent.primitive,
           status: 'ok',
-          duration_ms: exploreResult.duration_ms,
+          duration_ms: operationResult.duration_ms,
           found_files: fileMatches ? fileMatches.length : 0,
         });
 
-        // Also try `codegraph query` for symbol lookup
-        const queryResult = runCodegraph(['query', JSON.stringify(query), '--limit', '10'], rp);
-        if (queryResult.exit_code === 0 && queryResult.output) {
+        // Explore retains the existing supplemental exact-symbol lookup.
+        const queryResult = intent.primitive === 'explore'
+          ? runCodegraph(['query', JSON.stringify(query), '--limit', '10'], rp)
+          : null;
+        if (queryResult && queryResult.exit_code === 0 && queryResult.output) {
           const clean = queryResult.output.replace(/\u001b\[\d+m/g, '');
           const qLines = clean.split('\n').filter(l =>
             l.includes('function') || l.includes('class') || l.includes('route')
@@ -373,7 +385,7 @@ async function collectEvidence(repoId, mission, queries) {
         }
 
         // Check for test/verify patterns
-        if (output.includes('test') || output.includes('spec') || (exploreResult.output || '').includes('Test')) {
+        if (output.includes('test') || output.includes('spec') || (operationResult.output || '').includes('Test')) {
           // Already captured in testMatches above
         }
 
@@ -382,7 +394,7 @@ async function collectEvidence(repoId, mission, queries) {
           ownershipEvidence.push({ type: 'ownership_manifest', detail: 'Found service/package definition files' });
         }
       } else {
-        receipt.error = exploreResult.error || 'No output from explore';
+        receipt.error = operationResult.error || `No output from ${intent.primitive}`;
         receipt.status = 'error';
       }
     } catch (e) {
@@ -571,8 +583,28 @@ async function main() {
   // Read input
   let input = '';
   if (process.argv[2] && process.argv[2] !== '--stdin') {
-    // Read JSON from file
-    input = fs.readFileSync(process.argv[2], 'utf8');
+    const inputPath = process.argv[2];
+    let inputStat;
+    try {
+      inputStat = fs.lstatSync(inputPath);
+    } catch (e) {
+      if (e.code === 'ENOENT') {
+        console.error(JSON.stringify({
+          status: 'ERROR',
+          error: `Input file does not exist: ${inputPath}`,
+        }));
+        process.exit(1);
+      }
+      throw e;
+    }
+    if (!inputStat.isFile()) {
+      console.error(JSON.stringify({
+        status: 'ERROR',
+        error: `Input path is not a regular file: ${inputPath}`,
+      }));
+      process.exit(1);
+    }
+    input = fs.readFileSync(inputPath, 'utf8');
   } else {
     // Read from stdin
     const chunks = [];
@@ -670,6 +702,12 @@ async function main() {
       dependency_evidence_count: e.dependency_evidence ? e.dependency_evidence.length : 0,
       ownership_evidence_count: e.ownership_evidence ? e.ownership_evidence.length : 0,
       negative_evidence: e.negative_evidence || [],
+      primitive_selections: (e.query_receipts || []).map(r => ({
+        query: r.query,
+        primitive: r.type,
+        status: r.status || r.result,
+      })),
+      broad_explore_calls: (e.query_receipts || []).filter(r => r.type === 'explore').length,
     })),
     recommended_repo: recommendation.recommended_repo,
     confidence: recommendation.confidence,
