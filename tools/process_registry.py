@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
+from agent.secret_output import sanitize_command_display, sanitize_secret_output
 
 logger = logging.getLogger(__name__)
 
@@ -533,7 +534,7 @@ class ProcessRegistry:
         """
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
-            command=command,
+            command=sanitize_command_display(command).text,
             task_id=task_id,
             session_key=session_key,
             cwd=_resolve_safe_cwd(cwd or os.getcwd()),
@@ -671,7 +672,7 @@ class ProcessRegistry:
         """
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
-            command=command,
+            command=sanitize_command_display(command).text,
             task_id=task_id,
             session_key=session_key,
             cwd=cwd,
@@ -718,11 +719,11 @@ class ProcessRegistry:
                 session.exit_code = int(result.get("returncode", -1))
                 if session.exit_code == 0:
                     session.exit_code = -1
-                session.output_buffer = result.get("output", "").strip()
+                session.output_buffer = sanitize_secret_output(result.get("output", ""), source_stream="combined").text.strip()
         except Exception as e:
             session.exited = True
             session.exit_code = -1
-            session.output_buffer = f"Failed to start: {e}"
+            session.output_buffer = f"Failed to start: {sanitize_secret_output(e, source_stream='exception').text}"
 
         if not session.exited:
             # Start a poller thread that periodically reads the log file
@@ -758,6 +759,7 @@ class ProcessRegistry:
                 if first_chunk:
                     chunk = self._clean_shell_noise(chunk)
                     first_chunk = False
+                chunk = sanitize_secret_output(chunk, source_stream="stdout").text
                 with session._lock:
                     session.output_buffer += chunk
                     if len(session.output_buffer) > session.max_output_chars:
@@ -788,7 +790,7 @@ class ProcessRegistry:
             try:
                 # Read new output from the log file
                 result = env.execute(f"cat {quoted_log_path} 2>/dev/null", timeout=10)
-                new_output = result.get("output", "")
+                new_output = sanitize_secret_output(result.get("output", ""), source_stream="combined").text
                 if new_output:
                     # Compute delta for watch pattern scanning
                     delta = new_output[prev_output_len:] if len(new_output) > prev_output_len else ""
@@ -838,6 +840,7 @@ class ProcessRegistry:
                     if chunk:
                         # ptyprocess returns bytes
                         text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+                        text = sanitize_secret_output(text, source_stream="stdout").text
                         with session._lock:
                             session.output_buffer += text
                             if len(session.output_buffer) > session.max_output_chars:
@@ -876,7 +879,7 @@ class ProcessRegistry:
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
         if was_running and session.notify_on_complete:
             from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output_tail = sanitize_secret_output(strip_ansi(session.output_buffer[-2000:]), source_stream="stdout").text if session.output_buffer else ""
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
@@ -978,7 +981,7 @@ class ProcessRegistry:
 
         with session._lock:
             if drained:
-                session.output_buffer += drained
+                session.output_buffer += sanitize_secret_output(drained, source_stream="stdout").text
                 if len(session.output_buffer) > session.max_output_chars:
                     session.output_buffer = session.output_buffer[-session.max_output_chars:]
             session.exited = True
@@ -1447,7 +1450,7 @@ class ProcessRegistry:
             if alive:
                 session = ProcessSession(
                     id=entry["session_id"],
-                    command=entry.get("command", "unknown"),
+                    command=sanitize_command_display(entry.get("command", "unknown")).text,
                     task_id=entry.get("task_id", ""),
                     session_key=entry.get("session_key", ""),
                     pid=pid,

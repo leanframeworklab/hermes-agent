@@ -293,7 +293,9 @@ class LSPClient:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    logger.debug("[%s] stderr: %s", self.server_id, text[:1000])
+                    from agent.secret_output import sanitize_secret_output
+                    safe_text = sanitize_secret_output(text, source_stream="stderr").text
+                    logger.debug("[%s] stderr: %s", self.server_id, safe_text[:1000])
         except (asyncio.CancelledError, OSError):
             pass
 

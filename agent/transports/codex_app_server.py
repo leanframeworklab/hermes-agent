@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from agent.secret_output import sanitize_secret_output
+
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
@@ -310,13 +312,20 @@ class CodexAppServerClient:
                     # on stderr. Surface it via stderr buffer for diagnostics.
                     with self._stderr_lock:
                         self._stderr_lines.append(
-                            f"<non-json on stdout> {line[:200]!r}"
+                            sanitize_secret_output(
+                                f"<non-json on stdout> {line[:200]!r}",
+                                source_stream="stdout",
+                            ).text
                         )
                     continue
                 self._dispatch(msg)
         except Exception as exc:
             with self._stderr_lock:
-                self._stderr_lines.append(f"<stdout reader error> {exc}")
+                self._stderr_lines.append(
+                    sanitize_secret_output(
+                        f"<stdout reader error> {exc}", source_stream="stdout"
+                    ).text
+                )
 
     def _dispatch(self, msg: dict) -> None:
         # Reply (has id + result/error, no method)
@@ -346,7 +355,10 @@ class CodexAppServerClient:
                     break
                 with self._stderr_lock:
                     self._stderr_lines.append(
-                        line.decode("utf-8", "replace").rstrip()
+                        sanitize_secret_output(
+                            line.decode("utf-8", "replace").rstrip(),
+                            source_stream="stderr",
+                        ).text
                     )
                     # Bound memory: keep last 500 lines.
                     if len(self._stderr_lines) > 500:
@@ -387,10 +399,16 @@ def check_codex_binary(
     except subprocess.TimeoutExpired:
         return False, "codex --version timed out"
     if proc.returncode != 0:
-        return False, f"codex --version exited {proc.returncode}: {proc.stderr.strip()}"
+        return False, sanitize_secret_output(
+            f"codex --version exited {proc.returncode}: {proc.stderr.strip()}",
+            source_stream="stderr",
+        ).text
     version = parse_codex_version(proc.stdout)
     if version is None:
-        return False, f"could not parse codex version from: {proc.stdout!r}"
+        return False, sanitize_secret_output(
+            f"could not parse codex version from: {proc.stdout!r}",
+            source_stream="stdout",
+        ).text
     if version < min_version:
         return False, (
             f"codex {'.'.join(map(str, version))} is older than required "

@@ -256,7 +256,7 @@ def setup_logging(
     backups = backup_count or cfg_backup or 3
 
     # Lazy import to avoid circular dependency at module load time.
-    from agent.redact import RedactingFormatter
+    from agent.secret_output import SecretBoundaryFormatter
 
     root = logging.getLogger()
 
@@ -267,7 +267,7 @@ def setup_logging(
         level=level,
         max_bytes=max_bytes,
         backup_count=backups,
-        formatter=RedactingFormatter(_LOG_FORMAT),
+        formatter=SecretBoundaryFormatter(_LOG_FORMAT),
     )
 
     # --- errors.log (WARNING+) — quick triage log --------------------------
@@ -277,7 +277,7 @@ def setup_logging(
         level=logging.WARNING,
         max_bytes=2 * 1024 * 1024,
         backup_count=2,
-        formatter=RedactingFormatter(_LOG_FORMAT),
+        formatter=SecretBoundaryFormatter(_LOG_FORMAT),
     )
 
     # --- gateway.log (INFO+, gateway component only) ------------------------
@@ -288,7 +288,7 @@ def setup_logging(
             level=logging.INFO,
             max_bytes=5 * 1024 * 1024,
             backup_count=3,
-            formatter=RedactingFormatter(_LOG_FORMAT),
+        formatter=SecretBoundaryFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
         )
 
@@ -300,7 +300,7 @@ def setup_logging(
             level=logging.INFO,
             max_bytes=10 * 1024 * 1024,
             backup_count=5,
-            formatter=RedactingFormatter(_LOG_FORMAT),
+        formatter=SecretBoundaryFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gui"]),
         )
 
@@ -324,7 +324,7 @@ def setup_verbose_logging() -> None:
 
     Called by ``AIAgent.__init__()`` when ``verbose_logging=True``.
     """
-    from agent.redact import RedactingFormatter
+    from agent.secret_output import SecretBoundaryFormatter
 
     root = logging.getLogger()
 
@@ -336,7 +336,7 @@ def setup_verbose_logging() -> None:
 
     handler = logging.StreamHandler(_safe_stderr())
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(RedactingFormatter(_LOG_FORMAT_VERBOSE, datefmt="%H:%M:%S"))
+    handler.setFormatter(SecretBoundaryFormatter(_LOG_FORMAT_VERBOSE, datefmt="%H:%M:%S"))
     handler._hermes_verbose = True  # type: ignore[attr-defined]
     root.addHandler(handler)
 

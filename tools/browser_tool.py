@@ -866,6 +866,7 @@ def _run_chrome_fallback_command(
         browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
 
     def _run_tmp(cmd: str, cmd_args: List[str]) -> Dict[str, Any]:
+        from agent.secret_output import sanitize_command_display, sanitize_secret_output
         full = base_args + [cmd] + cmd_args
         # Use temp-file stdout/stderr pattern (same as _run_browser_command)
         # to avoid pipe hang from agent-browser daemon inheriting fds.
@@ -926,10 +927,11 @@ def _run_chrome_fallback_command(
         try:
             with open(stdout_path, "r", encoding="utf-8") as f:
                 stdout = f.read().strip()
+            stdout = sanitize_secret_output(stdout, source_stream="stdout").text
             if stdout:
                 return json.loads(stdout.split("\n")[-1])
         except Exception as exc:
-            logger.debug("Chrome fallback tmp cmd '%s' error: %s", cmd, exc)
+            logger.debug("Chrome fallback tmp cmd '%s' error: %s", sanitize_command_display(cmd).text, exc)
         finally:
             for pth in (stdout_path, stderr_path):
                 try:
@@ -2096,6 +2098,10 @@ def _run_browser_command(
                 stdout = f.read()
             with open(stderr_path, "r", encoding="utf-8") as f:
                 stderr = f.read()
+            from agent.secret_output import sanitize_command_display, sanitize_secret_output
+            safe_command = sanitize_command_display(command).text
+            stdout = sanitize_secret_output(stdout, source_stream="stdout").text
+            stderr = sanitize_secret_output(stderr, source_stream="stderr").text
             returncode = proc.returncode
 
             # Clean up temp files (best-effort)
@@ -2108,7 +2114,7 @@ def _run_browser_command(
             # Log stderr for diagnostics — use warning level on failure so it's visible
             if stderr and stderr.strip():
                 level = logging.WARNING if returncode != 0 else logging.DEBUG
-                logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
+                logger.log(level, "browser '%s' stderr: %s", safe_command, stderr.strip()[:500])
 
             stdout_text = stdout.strip()
 
@@ -2116,7 +2122,7 @@ def _run_browser_command(
             # than silently returning {"success": True, "data": {}}.
             # Some commands (close, record) legitimately return no output.
             if not stdout_text and returncode == 0 and command not in _EMPTY_OK_COMMANDS:
-                logger.warning("browser '%s' returned empty output (rc=0)", command)
+                logger.warning("browser '%s' returned empty output (rc=0)", safe_command)
                 result = {"success": False, "error": f"Browser command '{command}' returned no output"}
             elif stdout_text:
                 try:
@@ -2132,7 +2138,7 @@ def _run_browser_command(
                 except json.JSONDecodeError:
                     raw = stdout_text[:2000]
                     logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                                   command, returncode, raw[:500])
+                                   safe_command, returncode, raw[:500])
 
                     if command == "screenshot":
                         stderr_text = (stderr or "").strip()
@@ -2166,14 +2172,15 @@ def _run_browser_command(
             elif returncode != 0:
                 # Check for errors
                 error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
-                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
+                logger.warning("browser '%s' failed (rc=%s): %s", safe_command, returncode, error_msg[:300])
                 result = {"success": False, "error": error_msg}
             else:
                 result = {"success": True, "data": {}}
 
     except Exception as e:
-        logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
-        result = {"success": False, "error": str(e)}
+        from agent.secret_output import sanitize_command_display, sanitize_exception
+        logger.warning("browser '%s' exception: %s", sanitize_command_display(command).text, sanitize_exception(e).text, exc_info=True)
+        result = {"success": False, "error": sanitize_exception(e).text}
 
     # --- Lightpanda automatic Chrome fallback ---
     # If engine is lightpanda and the result looks broken, retry with Chrome.

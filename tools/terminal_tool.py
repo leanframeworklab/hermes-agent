@@ -447,9 +447,11 @@ def _safe_command_preview(command: Any, limit: int = 200) -> str:
     if command is None:
         return "<None>"
     if isinstance(command, str):
-        return command[:limit]
+        from agent.secret_output import sanitize_command_display
+        return sanitize_command_display(command).text[:limit]
     try:
-        return repr(command)[:limit]
+        from agent.secret_output import sanitize_command_display
+        return sanitize_command_display(repr(command)).text[:limit]
     except Exception:
         return f"<{type(command).__name__}>"
 
@@ -1842,6 +1844,17 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
+        from agent.secret_output import classify_secret_command
+        secret_command_decision = classify_secret_command(command)
+        if not secret_command_decision["allowed"]:
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": "Command blocked: credential-dumping command requires metadata-safe alternative",
+                "command": secret_command_decision["command"],
+                "status": "blocked",
+            }, ensure_ascii=False)
+
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
@@ -2343,7 +2356,8 @@ def terminal_tool(
                 break
             
             # Extract output
-            output = result.get("output", "")
+            from agent.secret_output import sanitize_secret_output
+            output = sanitize_secret_output(result.get("output", ""), source_stream="combined").text
             returncode = result.get("returncode", 0)
 
             # Add helpful message for sudo failures in messaging context
@@ -2388,9 +2402,14 @@ def terminal_tool(
             from tools.ansi_strip import strip_ansi
             output = strip_ansi(output)
 
-            # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            output = sanitize_secret_output(output.strip(), source_stream="combined").text if output else ""
+            # Preserve the existing display-redaction contract after the
+            # mandatory boundary.  This second pass can only see sanitized
+            # text and therefore cannot re-expose the original value.
+            if output:
+                output = output.replace("[REDACTED:credential]", "***")
+                from agent.redact import redact_sensitive_text
+                output = redact_sensitive_text(output, force=True)
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
@@ -2410,12 +2429,16 @@ def terminal_tool(
 
     except Exception as e:
         import traceback
-        tb_str = traceback.format_exc()
-        logger.error("terminal_tool exception:\n%s", tb_str)
+        from agent.secret_output import sanitize_command_display, sanitize_exception
+        tb_str = sanitize_exception(RuntimeError(traceback.format_exc())).text
+        safe_error = sanitize_exception(e).text
+        safe_command = sanitize_command_display(command).text if isinstance(command, str) else "<invalid>"
+        logger.error("terminal_tool exception command=%s:\n%s", safe_command, tb_str)
         return json.dumps({
             "output": "",
             "exit_code": -1,
-            "error": f"Failed to execute command: {str(e)}",
+            "error": f"Failed to execute command: {safe_error}",
+            "command": safe_command,
             "traceback": tb_str,
             "status": "error"
         }, ensure_ascii=False)

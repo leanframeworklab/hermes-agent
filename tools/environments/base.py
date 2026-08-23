@@ -663,8 +663,10 @@ class BaseEnvironment(ABC):
                         )
                     self._kill_process(proc)
                     drain_thread.join(timeout=2)
+                    from agent.secret_output import sanitize_secret_output
+                    safe = sanitize_secret_output("".join(output_chunks) + "\n[Command interrupted]", source_stream="combined")
                     return {
-                        "output": "".join(output_chunks) + "\n[Command interrupted]",
+                        "output": safe.text,
                         "returncode": 130,
                     }
                 if time.monotonic() > deadline:
@@ -676,7 +678,8 @@ class BaseEnvironment(ABC):
                         )
                     self._kill_process(proc)
                     drain_thread.join(timeout=2)
-                    partial = "".join(output_chunks)
+                    from agent.secret_output import sanitize_secret_output
+                    partial = sanitize_secret_output("".join(output_chunks), source_stream="combined").text
                     timeout_msg = f"\n[Command timed out after {timeout}s]"
                     return {
                         "output": partial + timeout_msg
@@ -757,7 +760,9 @@ class BaseEnvironment(ABC):
                 proc.returncode,
             )
 
-        return {"output": "".join(output_chunks), "returncode": proc.returncode}
+        from agent.secret_output import sanitize_secret_output
+        safe = sanitize_secret_output("".join(output_chunks), source_stream="combined")
+        return {"output": safe.text, "returncode": proc.returncode}
 
     def _kill_process(self, proc: ProcessHandle):
         """Terminate a process. Subclasses may override for process-group kill."""

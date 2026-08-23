@@ -77,6 +77,7 @@ except ImportError:  # pragma: no cover
 
 from hermes_constants import get_hermes_home
 from utils import atomic_replace
+from agent.secret_output import sanitize_command_display, sanitize_exception, sanitize_secret_output
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +383,7 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     try:
         argv = shlex.split(os.path.expanduser(spec.command))
     except ValueError as exc:
-        result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
+        result["error"] = f"command {sanitize_command_display(spec.command).text} cannot be parsed: {sanitize_exception(exc).text}"
         return result
     if not argv:
         result["error"] = "empty command"
@@ -409,12 +410,12 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         result["error"] = "command not executable"
         return result
     except Exception as exc:  # pragma: no cover — defensive
-        result["error"] = str(exc)
+        result["error"] = sanitize_exception(exc).text
         return result
 
     result["returncode"] = proc.returncode
-    result["stdout"] = proc.stdout or ""
-    result["stderr"] = proc.stderr or ""
+    result["stdout"] = sanitize_secret_output(proc.stdout or "", source_stream="stdout").text
+    result["stderr"] = sanitize_secret_output(proc.stderr or "", source_stream="stderr").text
     result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
     return result
 
@@ -433,13 +434,13 @@ def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]
         if r["error"]:
             logger.warning(
                 "shell hook failed (event=%s command=%s): %s",
-                spec.event, spec.command, r["error"],
+                spec.event, sanitize_command_display(spec.command).text, r["error"],
             )
             return None
         if r["timed_out"]:
             logger.warning(
                 "shell hook timed out after %.2fs (event=%s command=%s)",
-                r["elapsed_seconds"], spec.event, spec.command,
+                r["elapsed_seconds"], spec.event, sanitize_command_display(spec.command).text,
             )
             return None
 
@@ -447,14 +448,14 @@ def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]
         if stderr:
             logger.debug(
                 "shell hook stderr (event=%s command=%s): %s",
-                spec.event, spec.command, stderr[:400],
+                spec.event, sanitize_command_display(spec.command).text, stderr[:400],
             )
         # Non-zero exits: log but still parse stdout so scripts that
         # signal failure via exit code can also return a block directive.
         if r["returncode"] != 0:
             logger.warning(
                 "shell hook exited %d (event=%s command=%s); stderr=%s",
-                r["returncode"], spec.event, spec.command, stderr[:400],
+                r["returncode"], spec.event, sanitize_command_display(spec.command).text, stderr[:400],
             )
         return _parse_response(spec.event, r["stdout"])
 

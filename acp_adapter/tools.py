@@ -514,12 +514,16 @@ def _format_web_extract_result(result: Optional[str]) -> Optional[str]:
 
 
 def _format_process_result(result: Optional[str], args: Optional[Dict[str, Any]]) -> Optional[str]:
-    data = _json_loads_maybe(result)
+    from agent.secret_output import sanitize_mapping, sanitize_secret_output
+
+    safe_result = sanitize_secret_output(result or "", source_stream="mcp").text
+    safe_args = sanitize_mapping(args or {}).value
+    data = _json_loads_maybe(safe_result)
     if not isinstance(data, dict):
-        return result if isinstance(result, str) and result.strip() else None
+        return safe_result if safe_result.strip() else None
     if data.get("success") is False and data.get("error"):
         return f"Process error: {data.get('error')}"
-    action = str((args or {}).get("action") or "process").strip() or "process"
+    action = str(safe_args.get("action") or "process").strip() or "process"
     if isinstance(data.get("processes"), list):
         processes = data["processes"]
         lines = [f"Processes: {len(processes)}"]
@@ -543,7 +547,7 @@ def _format_process_result(result: Optional[str], args: Optional[Dict[str, Any]]
         return "\n".join(lines)
 
     status = str(data.get("status") or data.get("state") or action).strip()
-    sid = str(data.get("session_id") or (args or {}).get("session_id") or "").strip()
+    sid = str(data.get("session_id") or safe_args.get("session_id") or "").strip()
     lines = [f"Process {action}: {status}" + (f" (`{sid}`)" if sid else "")]
     for key, label in (("command", "Command"), ("pid", "PID"), ("exit_code", "Exit code"), ("returncode", "Exit code"), ("lines", "Lines")):
         if data.get(key) is not None:

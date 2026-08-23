@@ -23,6 +23,7 @@ from typing import Any
 
 from agent.file_safety import get_read_block_error, is_write_denied
 from agent.redact import redact_sensitive_text
+from agent.secret_output import sanitize_secret_output
 
 ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
@@ -477,7 +478,7 @@ class CopilotACPClient:
             if proc.stderr is None:
                 return
             for line in proc.stderr:
-                stderr_tail.append(line.rstrip("\n"))
+                stderr_tail.append(sanitize_secret_output(line.rstrip("\n"), source_stream="stderr").text)
 
         out_thread = threading.Thread(target=_stdout_reader, daemon=True)
         err_thread = threading.Thread(target=_stderr_reader, daemon=True)
