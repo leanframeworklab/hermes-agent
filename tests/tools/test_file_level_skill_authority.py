@@ -223,3 +223,44 @@ def test_lah_governed_mission_is_an_approved_codex_file_mapping(tmp_path):
     plan = plan_file_runtime_authority(tmp_path / "runtime", declarations)
     assert plan[0]["logical_skill"] == "lah-governed-mission"
     assert plan[0]["runtime_file"] == "lah-governed-mission/SKILL.md"
+
+
+def test_incremental_file_deployment_preserves_existing_managed_mapping(tmp_path):
+    runtime = tmp_path / "runtime"
+    existing_target = runtime / "lah-workflow/SKILL.md"
+    existing_target.parent.mkdir(parents=True)
+    existing_target.write_text("existing", encoding="utf-8")
+    existing_manifest = {
+        "schema_version": 1,
+        "skills": {},
+        "file_mappings": {
+            "lah-workflow": {
+                "invocation_name": "lah-workflow",
+                "source_repo": "existing",
+                "source_path": "/existing",
+                "source_file": "SKILL.md",
+                "source_sha": "existing-sha",
+                "source_fingerprint": sha(existing_target),
+                "runtime_file": "lah-workflow/SKILL.md",
+                "runtime_fingerprint": sha(existing_target),
+                "deployment_method": FILE_DEPLOYMENT_AUTHORITY,
+            }
+        },
+    }
+    runtime.mkdir(exist_ok=True)
+    (runtime / ".governance_manifest.json").write_text(json.dumps(existing_manifest), encoding="utf-8")
+    declarations = {
+        "lah-governed-mission": {
+            "source_repo": "leanframeworklab/lah-stack-skills",
+            "source_path": str(CANONICAL_SOURCE),
+            "source_file": "lah-governed-mission/SKILL.md",
+            "runtime_file": "lah-governed-mission/SKILL.md",
+        }
+    }
+    manifest = deploy_runtime_authority(
+        runtime, {}, file_declarations=declarations,
+        deployment_authority=FILE_DEPLOYMENT_AUTHORITY, allow_runtime_drift=True,
+    )
+    assert "lah-workflow" in manifest["file_mappings"]
+    assert "lah-governed-mission" in manifest["file_mappings"]
+    assert existing_target.read_text(encoding="utf-8") == "existing"

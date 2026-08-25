@@ -460,9 +460,25 @@ def deploy_runtime_authority(
         plans.append((name, source_dir, target_dir, source_hash, source_sha, declaration))
 
     staging_root = Path(tempfile.mkdtemp(prefix=".governance-deploy-", dir=runtime_root.parent))
-    manifest: dict[str, Any] = {"schema_version": 1, "skills": {}}
+    existing_manifest: dict[str, Any] = {}
+    existing_manifest_file = manifest_path(runtime_root)
+    if existing_manifest_file.is_file():
+        try:
+            loaded = json.loads(existing_manifest_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing_manifest = loaded
+        except (OSError, json.JSONDecodeError):
+            existing_manifest = {}
+    preserved_skills = existing_manifest.get("skills", {}) if not declarations else {}
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "skills": dict(preserved_skills) if isinstance(preserved_skills, Mapping) else {},
+    }
     if file_plans:
-        manifest["file_mappings"] = {}
+        preserved_files = existing_manifest.get("file_mappings", {})
+        manifest["file_mappings"] = (
+            dict(preserved_files) if isinstance(preserved_files, Mapping) else {}
+        )
     try:
         for name, source_dir, target_dir, source_hash, source_sha, declaration in plans:
             relative = target_dir.relative_to(runtime_root)
