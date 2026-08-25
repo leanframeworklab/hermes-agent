@@ -30,6 +30,7 @@ APPROVED_FILE_SOURCE_ROOTS = {
 }
 APPROVED_FILE_RUNTIME_TARGETS = {
     "lah-workflow": "lah-workflow/SKILL.md",
+    "lah-governed-mission": "lah-governed-mission/SKILL.md",
 }
 
 

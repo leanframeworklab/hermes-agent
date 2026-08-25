@@ -209,3 +209,17 @@ def test_failed_drift_deployment_leaves_target_unchanged(tmp_path):
             deployment_authority=FILE_DEPLOYMENT_AUTHORITY,
         )
     assert target.read_text(encoding="utf-8") == before
+
+
+def test_lah_governed_mission_is_an_approved_codex_file_mapping(tmp_path):
+    declarations = {
+        "lah-governed-mission": {
+            "source_repo": "leanframeworklab/lah-stack-skills",
+            "source_path": str(CANONICAL_SOURCE),
+            "source_file": "lah-governed-mission/SKILL.md",
+            "runtime_file": "lah-governed-mission/SKILL.md",
+        }
+    }
+    plan = plan_file_runtime_authority(tmp_path / "runtime", declarations)
+    assert plan[0]["logical_skill"] == "lah-governed-mission"
+    assert plan[0]["runtime_file"] == "lah-governed-mission/SKILL.md"
