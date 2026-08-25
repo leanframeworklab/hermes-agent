@@ -24,6 +24,13 @@ CRITICAL_SKILLS = (
     "mission-decomposer",
 )
 MANIFEST_FILENAME = ".governance_manifest.json"
+FILE_DEPLOYMENT_AUTHORITY = "tools.skill_authority.deploy_runtime_authority"
+APPROVED_FILE_SOURCE_ROOTS = {
+    "leanframeworklab/lah-stack-skills": Path("/home/deploy/lah-stack-repos/lah-stack-skills").resolve(),
+}
+APPROVED_FILE_RUNTIME_TARGETS = {
+    "lah-workflow": "lah-workflow/SKILL.md",
+}
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,14 @@ def _manifest_entry_for_path(
         declared = Path(str(entry.get("runtime_path", "")))
         if relative == declared or declared in relative.parents:
             return str(name), entry
+    file_entries = manifest.get("file_mappings", {})
+    if isinstance(file_entries, Mapping):
+        for name, entry in file_entries.items():
+            if not isinstance(entry, Mapping):
+                continue
+            declared = Path(str(entry.get("runtime_file", "")))
+            if relative == declared:
+                return str(name), entry
     return None
 
 
@@ -221,6 +236,147 @@ def _git_sha(path: Path) -> str | None:
         return None
 
 
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _git_file_sha256(root: Path, source_sha: str, relative: Path) -> str | None:
+    try:
+        data = subprocess.check_output(
+            ["git", "-C", str(root), "show", f"{source_sha}:{relative.as_posix()}"],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _relative_file_path(value: str, error: str) -> Path:
+    candidate = Path(value)
+    if not value or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(error)
+    return candidate
+
+
+def _path_has_symlink_component(path: Path, root: Path) -> bool:
+    current = root
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _plan_file_deployments(
+    runtime_root: Path,
+    declarations: Mapping[str, Mapping[str, Any]],
+    *,
+    approved_source_roots: Mapping[str, Path],
+    approved_runtime_targets: Mapping[str, str],
+    deployment_authority: str | None,
+) -> list[dict[str, Any]]:
+    if deployment_authority != FILE_DEPLOYMENT_AUTHORITY:
+        raise ValueError("SKILL_DEPLOYMENT_AUTHORITY_REQUIRED")
+    root = runtime_root.resolve()
+    plans: list[dict[str, Any]] = []
+    for name, declaration in sorted(declarations.items()):
+        source_repo = str(declaration.get("source_repo", ""))
+        approved_root = approved_source_roots.get(source_repo)
+        source_root = Path(str(declaration.get("source_path", ""))).resolve()
+        if approved_root is None or source_root != Path(approved_root).resolve():
+            raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_SOURCE: {name}")
+        source_relative = _relative_file_path(
+            str(declaration.get("source_file", "")),
+            f"UNDECLARED_SKILL_DEPLOYMENT_SOURCE: {name}",
+        )
+        source_file = source_root / source_relative
+        if _path_has_symlink_component(source_file, source_root) or not source_file.is_file():
+            raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_SOURCE: {name}")
+        runtime_relative = _relative_file_path(
+            str(declaration.get("runtime_file", "")),
+            f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {name}",
+        )
+        if approved_runtime_targets.get(name) != runtime_relative.as_posix():
+            raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {name}")
+        target_file = root / runtime_relative
+        if _path_has_symlink_component(target_file, root):
+            raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {name}")
+        source_fingerprint = _file_sha256(source_file)
+        declared_fingerprint = declaration.get("source_fingerprint")
+        if declared_fingerprint and declared_fingerprint != source_fingerprint:
+            raise ValueError(f"SKILL_SOURCE_FINGERPRINT_MISMATCH: {name}")
+        source_sha = declaration.get("source_sha") or _git_sha(source_root)
+        if declaration.get("source_sha") and _git_sha(source_root) != declaration["source_sha"]:
+            raise ValueError(f"SKILL_SOURCE_FINGERPRINT_MISMATCH: {name}")
+        if declaration.get("source_sha"):
+            committed_fingerprint = _git_file_sha256(source_root, declaration["source_sha"], source_relative)
+            if committed_fingerprint != source_fingerprint:
+                raise ValueError(f"SKILL_SOURCE_FINGERPRINT_MISMATCH: {name}")
+        target_fingerprint = _file_sha256(target_file) if target_file.is_file() else None
+        plans.append({
+            "logical_skill": name,
+            "source_repo": source_repo,
+            "source_path": str(source_root),
+            "source_file": source_relative.as_posix(),
+            "source_sha": source_sha,
+            "source_fingerprint": source_fingerprint,
+            "runtime_file": runtime_relative.as_posix(),
+            "target": str(target_file),
+            "target_current_fingerprint": target_fingerprint,
+            "expected_change": target_fingerprint != source_fingerprint,
+        })
+    return plans
+
+
+def plan_file_runtime_authority(
+    runtime_root: Path,
+    declarations: Mapping[str, Mapping[str, Any]],
+    *,
+    approved_source_roots: Mapping[str, Path] | None = None,
+    approved_runtime_targets: Mapping[str, str] | None = None,
+    deployment_authority: str | None = FILE_DEPLOYMENT_AUTHORITY,
+) -> list[dict[str, Any]]:
+    return _plan_file_deployments(
+        runtime_root,
+        declarations,
+        approved_source_roots=approved_source_roots or APPROVED_FILE_SOURCE_ROOTS,
+        approved_runtime_targets=approved_runtime_targets or APPROVED_FILE_RUNTIME_TARGETS,
+        deployment_authority=deployment_authority,
+    )
+
+
+def validate_file_runtime_authority(
+    runtime_root: Path, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    root = runtime_root.resolve()
+    errors: list[str] = []
+    results: dict[str, Any] = {}
+    entries = manifest.get("file_mappings", {})
+    if not isinstance(entries, Mapping):
+        return {"valid": False, "errors": ["file deployment manifest missing file_mappings"], "files": {}}
+    for name, entry in entries.items():
+        target = root / str(entry.get("runtime_file", ""))
+        source = Path(str(entry.get("source_path", ""))) / str(entry.get("source_file", ""))
+        source_fingerprint = _file_sha256(source) if source.is_file() else None
+        runtime_fingerprint = _file_sha256(target) if target.is_file() else None
+        results[name] = {
+            "source_fingerprint": source_fingerprint,
+            "runtime_fingerprint": runtime_fingerprint,
+            "match": source_fingerprint == runtime_fingerprint,
+        }
+        if source_fingerprint != entry.get("source_fingerprint"):
+            errors.append(f"{name}: source fingerprint drift")
+        if runtime_fingerprint != entry.get("runtime_fingerprint"):
+            errors.append(f"{name}: runtime fingerprint drift")
+        if source_fingerprint != runtime_fingerprint:
+            errors.append(f"{name}: content drift between source and runtime")
+    return {"valid": not errors, "errors": errors, "files": results}
+
+
 def build_manifest(runtime_root: Path, declarations: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     skills: dict[str, Any] = {}
     for name, declaration in sorted(declarations.items()):
@@ -244,6 +400,8 @@ def deploy_runtime_authority(
     runtime_root: Path,
     declarations: Mapping[str, Mapping[str, Any]],
     *,
+    file_declarations: Mapping[str, Mapping[str, Any]] | None = None,
+    deployment_authority: str | None = None,
     allow_runtime_drift: bool = False,
 ) -> dict[str, Any]:
     """Atomically deploy declared skill sources and write one provenance manifest.
@@ -254,6 +412,19 @@ def deploy_runtime_authority(
     """
     runtime_root = runtime_root.resolve()
     runtime_root.mkdir(parents=True, exist_ok=True)
+    file_plans = (
+        plan_file_runtime_authority(
+            runtime_root,
+            file_declarations,
+            deployment_authority=deployment_authority,
+        )
+        if file_declarations
+        else []
+    )
+    if not allow_runtime_drift:
+        for item in file_plans:
+            if item["expected_change"] and item["target_current_fingerprint"] is not None:
+                raise ValueError(f"unexpected runtime drift: {item['logical_skill']}")
     plans: list[tuple[str, Path, Path, str, str | None, Mapping[str, Any]]] = []
     for name, declaration in sorted(declarations.items()):
         source_dir = Path(str(declaration["source_path"])).resolve()
@@ -280,6 +451,8 @@ def deploy_runtime_authority(
 
     staging_root = Path(tempfile.mkdtemp(prefix=".governance-deploy-", dir=runtime_root.parent))
     manifest: dict[str, Any] = {"schema_version": 1, "skills": {}}
+    if file_plans:
+        manifest["file_mappings"] = {}
     try:
         for name, source_dir, target_dir, source_hash, source_sha, declaration in plans:
             relative = target_dir.relative_to(runtime_root)
@@ -298,6 +471,23 @@ def deploy_runtime_authority(
                 "deployment_method": "tools.skill_authority.deploy_runtime_authority",
                 "deployed_at": datetime.now(timezone.utc).isoformat(),
             }
+        for item in file_plans:
+            staged_file = staging_root / "file-payload" / item["runtime_file"]
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(item["source_path"]) / item["source_file"], staged_file)
+            if _file_sha256(staged_file) != item["source_fingerprint"]:
+                raise ValueError(f"SKILL_SOURCE_FINGERPRINT_MISMATCH: {item['logical_skill']}")
+            manifest["file_mappings"][item["logical_skill"]] = {
+                "invocation_name": item["logical_skill"],
+                "source_repo": item["source_repo"],
+                "source_path": item["source_path"],
+                "source_file": item["source_file"],
+                "source_sha": item["source_sha"],
+                "source_fingerprint": item["source_fingerprint"],
+                "runtime_file": item["runtime_file"],
+                "runtime_fingerprint": item["source_fingerprint"],
+                "deployment_method": FILE_DEPLOYMENT_AUTHORITY,
+            }
 
         for _, _, target_dir, _, _, _ in plans:
             relative = target_dir.relative_to(runtime_root)
@@ -306,6 +496,11 @@ def deploy_runtime_authority(
                 shutil.rmtree(target_dir)
             target_dir.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_dir, target_dir)
+        for item in file_plans:
+            staged_file = staging_root / "file-payload" / item["runtime_file"]
+            target_file = Path(item["target"])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_file, target_file)
 
         manifest_file = manifest_path(runtime_root)
         manifest_tmp = manifest_file.with_name(f"{manifest_file.name}.tmp")
@@ -391,3 +586,13 @@ def load_runtime_authority_status(runtime_root: Path | None = None) -> dict[str,
     except (OSError, json.JSONDecodeError):
         return {"valid": False, "errors": [f"missing or invalid manifest: {path}"], "skills": {}}
     return validate_runtime_authority(root, manifest)
+
+
+def load_file_runtime_authority_status(runtime_root: Path) -> dict[str, Any]:
+    root = runtime_root.resolve()
+    path = manifest_path(root)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"valid": False, "errors": [f"missing or invalid manifest: {path}"], "files": {}}
+    return validate_file_runtime_authority(root, manifest)
