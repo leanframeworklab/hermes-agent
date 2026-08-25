@@ -26,5 +26,21 @@
       "source_path": "/home/deploy/.lah-skill-authority/skills/lah-stack/lah-workflow-small-model",
       "runtime_path": "lah-stack/lah-workflow-small-model"
     }
+  },
+  "file_mappings": {
+    "lah-workflow": {
+      "logical_skill": "lah-workflow",
+      "runtime_consumer": "codex",
+      "source_repo": "leanframeworklab/lah-stack-skills",
+      "source_path": "/home/deploy/lah-stack-repos/lah-stack-skills",
+      "source_file": "SKILL.md",
+      "source_sha": "43ece31da874f9271d88d7978e3a25e571cb9e34",
+      "source_fingerprint": "b1480434798a4a57c57d646a1348181721d9a848365a3b139bc64b9004c0e986",
+      "runtime_root": "/home/deploy/.codex/skills",
+      "runtime_file": "lah-workflow/SKILL.md",
+      "deployment_authority": "tools.skill_authority.deploy_runtime_authority",
+      "mutation_scope": "declared_file_only",
+      "rollback": "restore_previous_target_fingerprint_or_leave_unchanged_on_plan_failure"
+    }
   }
 }
