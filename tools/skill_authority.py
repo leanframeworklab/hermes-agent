@@ -31,9 +31,6 @@ APPROVED_FILE_SOURCE_ROOTS = {
 APPROVED_FILE_RUNTIME_TARGETS = {
     "lah-workflow": "lah-workflow/SKILL.md",
 }
-APPROVED_FILE_RUNTIME_CONSUMERS = {
-    "codex": Path("/home/deploy/.codex/skills").resolve(),
-}
 
 
 @dataclass(frozen=True)
@@ -292,13 +289,6 @@ def _plan_file_deployments(
         source_root = Path(str(declaration.get("source_path", ""))).resolve()
         if approved_root is None or source_root != Path(approved_root).resolve():
             raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_SOURCE: {name}")
-        consumer = declaration.get("runtime_consumer")
-        approved_file_consumer = APPROVED_FILE_RUNTIME_CONSUMERS.get(str(consumer))
-        if consumer and approved_file_consumer:
-            if root != approved_file_consumer:
-                raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {name}")
-        elif consumer:
-            raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {name}")
         source_relative = _relative_file_path(
             str(declaration.get("source_file", "")),
             f"UNDECLARED_SKILL_DEPLOYMENT_SOURCE: {name}",
@@ -330,7 +320,6 @@ def _plan_file_deployments(
         plans.append({
             "logical_skill": name,
             "source_repo": source_repo,
-            "runtime_consumer": consumer,
             "source_path": str(source_root),
             "source_file": source_relative.as_posix(),
             "source_sha": source_sha,
@@ -360,26 +349,6 @@ def plan_file_runtime_authority(
     )
 
 
-def load_file_deployment_declarations(
-    manifest_file: Path, runtime_consumer: str
-) -> dict[str, Mapping[str, Any]]:
-    try:
-        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("SKILL_DEPLOYMENT_MANIFEST_INVALID") from exc
-    entries = manifest.get("file_mappings")
-    if not isinstance(entries, Mapping):
-        raise ValueError("SKILL_DEPLOYMENT_MANIFEST_INVALID")
-    selected = {
-        str(name): entry
-        for name, entry in entries.items()
-        if isinstance(entry, Mapping) and entry.get("runtime_consumer") == runtime_consumer
-    }
-    if not selected:
-        raise ValueError(f"UNDECLARED_SKILL_DEPLOYMENT_TARGET: {runtime_consumer}")
-    return selected
-
-
 def validate_file_runtime_authority(
     runtime_root: Path, manifest: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -392,7 +361,16 @@ def validate_file_runtime_authority(
     for name, entry in entries.items():
         target = root / str(entry.get("runtime_file", ""))
         source = Path(str(entry.get("source_path", ""))) / str(entry.get("source_file", ""))
-        source_fingerprint = _file_sha256(source) if source.is_file() else None
+        source_fingerprint = None
+        declared_source_sha = entry.get("source_sha")
+        if declared_source_sha:
+            source_fingerprint = _git_file_sha256(
+                Path(str(entry.get("source_path", ""))),
+                str(declared_source_sha),
+                Path(str(entry.get("source_file", ""))),
+            )
+        if source_fingerprint is None and source.is_file():
+            source_fingerprint = _file_sha256(source)
         runtime_fingerprint = _file_sha256(target) if target.is_file() else None
         results[name] = {
             "source_fingerprint": source_fingerprint,
@@ -511,7 +489,6 @@ def deploy_runtime_authority(
             manifest["file_mappings"][item["logical_skill"]] = {
                 "invocation_name": item["logical_skill"],
                 "source_repo": item["source_repo"],
-                "runtime_consumer": item["runtime_consumer"],
                 "source_path": item["source_path"],
                 "source_file": item["source_file"],
                 "source_sha": item["source_sha"],

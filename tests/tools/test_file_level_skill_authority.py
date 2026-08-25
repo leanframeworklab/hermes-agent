@@ -57,6 +57,34 @@ def test_exact_source_and_runtime_fingerprints_record_and_match(tmp_path):
     assert validate_file_runtime_authority(runtime, manifest)["valid"] is True
 
 
+def test_validation_uses_declared_git_blob_when_worktree_is_dirty(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "SKILL.md"
+    source_file.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(["git", "add", "SKILL.md"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "source"], cwd=source, check=True)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    committed_fingerprint = hashlib.sha256(b"committed\n").hexdigest()
+    source_file.write_text("uncommitted dirty state\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    target = runtime / "x/SKILL.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("committed\n", encoding="utf-8")
+    manifest = {"file_mappings": {"x": {
+        "source_path": str(source),
+        "source_file": "SKILL.md",
+        "source_sha": source_sha,
+        "source_fingerprint": committed_fingerprint,
+        "runtime_file": "x/SKILL.md",
+        "runtime_fingerprint": committed_fingerprint,
+    }}}
+    assert validate_file_runtime_authority(runtime, manifest)["valid"] is True
+
+
 def test_undeclared_source_rejected(tmp_path):
     with pytest.raises(ValueError, match="UNDECLARED_SKILL_DEPLOYMENT_SOURCE"):
         deploy(tmp_path / "runtime", source_repo="other/repo")
@@ -103,11 +131,8 @@ def test_source_fingerprint_mismatch_fails_closed(tmp_path):
 
 
 def test_committed_sha_rejects_uncommitted_source_file(tmp_path):
-    source_sha = subprocess.check_output(
-        ["git", "-C", str(CANONICAL_SOURCE), "rev-parse", "HEAD"], text=True
-    ).strip()
     with pytest.raises(ValueError, match="SKILL_SOURCE_FINGERPRINT_MISMATCH"):
-        deploy(tmp_path / "runtime", source_sha=source_sha)
+        deploy(tmp_path / "runtime", source_sha="0" * 40)
 
 
 def test_direct_foreground_mutation_remains_denied(tmp_path):
