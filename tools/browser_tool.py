@@ -1508,6 +1508,16 @@ BROWSER_TOOL_SCHEMAS = [
                 "ref": {
                     "type": "string",
                     "description": "The element reference from the snapshot (e.g., '@e5', '@e12')"
+                },
+                "postcondition": {
+                    "type": "object",
+                    "description": "Optional business-effect assertion evaluated after the click. If supplied, the tool fails closed unless the condition is verified.",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["js_truthy", "js_equals"]},
+                        "expression": {"type": "string", "description": "JavaScript expression used to verify the resulting page state."},
+                        "expected": {"description": "Expected value for js_equals."}
+                    },
+                    "required": ["type", "expression"]
                 }
             },
             "required": ["ref"]
@@ -1526,6 +1536,16 @@ BROWSER_TOOL_SCHEMAS = [
                 "text": {
                     "type": "string",
                     "description": "The text to type into the field"
+                },
+                "postcondition": {
+                    "type": "object",
+                    "description": "Optional business-effect assertion evaluated after typing. If supplied, the tool fails closed unless the condition is verified.",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["js_truthy", "js_equals"]},
+                        "expression": {"type": "string", "description": "JavaScript expression used to verify the resulting page state."},
+                        "expected": {"description": "Expected value for js_equals."}
+                    },
+                    "required": ["type", "expression"]
                 }
             },
             "required": ["ref", "text"]
@@ -2565,7 +2585,60 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_click(ref: str, task_id: Optional[str] = None) -> str:
+def _verify_browser_postcondition(effective_task_id: str, postcondition: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Verify a browser mutation's observable business effect.
+
+    A successful driver command is not treated as proof of a successful page
+    mutation when a postcondition is supplied. The assertion is evaluated
+    against the resulting page state and returns evidence suitable for an
+    ACTION_VERIFIED receipt.
+    """
+    if not postcondition:
+        return {"ok": True, "required": False, "type": None, "observed": None}
+    if not isinstance(postcondition, dict):
+        return {"ok": False, "required": True, "error": "postcondition must be an object"}
+    condition_type = str(postcondition.get("type") or "").strip()
+    expression = str(postcondition.get("expression") or "").strip()
+    if condition_type not in {"js_truthy", "js_equals"}:
+        return {"ok": False, "required": True, "type": condition_type, "error": "unsupported postcondition type"}
+    if not expression:
+        return {"ok": False, "required": True, "type": condition_type, "error": "postcondition expression is required"}
+
+    eval_result = _run_browser_command(effective_task_id, "eval", [expression])
+    if not eval_result.get("success"):
+        return {
+            "ok": False,
+            "required": True,
+            "type": condition_type,
+            "expression": expression,
+            "error": eval_result.get("error", "postcondition evaluation failed"),
+        }
+    raw = eval_result.get("data", {}).get("result")
+    observed = raw
+    if isinstance(raw, str):
+        try:
+            observed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            observed = raw
+
+    if condition_type == "js_truthy":
+        ok = bool(observed)
+        expected = True
+    else:
+        expected = postcondition.get("expected")
+        ok = observed == expected
+
+    return {
+        "ok": ok,
+        "required": True,
+        "type": condition_type,
+        "expression": expression,
+        "expected": expected,
+        "observed": observed,
+    }
+
+
+def browser_click(ref: str, task_id: Optional[str] = None, postcondition: Optional[Dict[str, Any]] = None) -> str:
     """
     Click on an element.
 
@@ -2589,10 +2662,25 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "click", [ref])
 
     if result.get("success"):
+        verification = _verify_browser_postcondition(effective_task_id, postcondition)
+        if postcondition and not verification.get("ok"):
+            response = {
+                "success": False,
+                "driver_success": True,
+                "effect_verified": False,
+                "error_code": "POSTCONDITION_FAILED",
+                "error": "Browser click completed but the requested business-effect postcondition was not verified",
+                "clicked": ref,
+                "verification": verification,
+            }
+            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
         response = {
             "success": True,
-            "clicked": ref
+            "clicked": ref,
+            "effect_verified": bool(postcondition),
         }
+        if postcondition:
+            response["verification"] = verification
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
         response = {
@@ -2602,7 +2690,7 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
+def browser_type(ref: str, text: str, task_id: Optional[str] = None, postcondition: Optional[Dict[str, Any]] = None) -> str:
     """
     Type text into an input field.
 
@@ -2628,11 +2716,27 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
     if result.get("success"):
+        verification = _verify_browser_postcondition(effective_task_id, postcondition)
+        if postcondition and not verification.get("ok"):
+            response = {
+                "success": False,
+                "driver_success": True,
+                "effect_verified": False,
+                "error_code": "POSTCONDITION_FAILED",
+                "error": "Browser fill completed but the requested business-effect postcondition was not verified",
+                "typed": text,
+                "element": ref,
+                "verification": verification,
+            }
+            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
         response = {
             "success": True,
             "typed": text,
-            "element": ref
+            "element": ref,
+            "effect_verified": bool(postcondition),
         }
+        if postcondition:
+            response["verification"] = verification
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
         response = {
@@ -3810,7 +3914,7 @@ registry.register(
     name="browser_click",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_click"],
-    handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id"), postcondition=args.get("postcondition")),
     check_fn=check_browser_requirements,
     emoji="👆",
 )
@@ -3818,7 +3922,7 @@ registry.register(
     name="browser_type",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_type"],
-    handler=lambda args, **kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id"), postcondition=args.get("postcondition")),
     check_fn=check_browser_requirements,
     emoji="⌨️",
 )
