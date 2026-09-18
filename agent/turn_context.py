@@ -151,10 +151,30 @@ def build_turn_context(
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
     from agent.governed_skill_state import GovernedSkillState, classify_governed_mission
-    _governed = classify_governed_mission(user_message)
+
+    # Hermes executor mode:
+    # Business/campaign governance belongs upstream.
+    # Do not activate the legacy governed workflow or Ling3 bootstrap.
+    import os as _lah_os
+    _executor_mode = _lah_os.getenv("HERMES_EXECUTOR_MODE", "0") == "1"
+
+    _governed = (
+        False
+        if _executor_mode
+        else classify_governed_mission(user_message)
+    )
+
     _authority = {"valid": True, "errors": []}
     _bootstrap_packet = None
-    _native_ling3 = "lah-workflow-ling3" in user_message.lower() or "ling-3.0-flash" in user_message.lower()
+
+    _native_ling3 = (
+        False
+        if _executor_mode
+        else (
+            "lah-workflow-ling3" in user_message.lower()
+            or "ling-3.0-flash" in user_message.lower()
+        )
+    )
     if _governed:
         from tools.skill_authority import load_runtime_authority_status
         _authority = load_runtime_authority_status()
